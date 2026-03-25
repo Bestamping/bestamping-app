@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 
-const STORAGE_KEY = "bestamping-guides-v1";
+const STORAGE_KEY = "bestamping-guides-upload-v1";
+const MAX_FILE_SIZE_MB = 12;
 
 const initialData = {
   stations: [
@@ -9,26 +10,7 @@ const initialData = {
     { id: "p3", name: "Plancha 3" },
     { id: "p4", name: "Plancha 4" },
   ],
-  guides: [
-    {
-      id: "g1",
-      station: "p1",
-      title: "Guía camiseta rosa",
-      type: "image",
-      file: "https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?q=80&w=1200&auto=format&fit=crop",
-      notes: "Revisar posición del logo y orden de prendas.",
-      updatedAt: new Date().toISOString(),
-    },
-    {
-      id: "g2",
-      station: "p2",
-      title: "Guía equipación azul",
-      type: "pdf",
-      file: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
-      notes: "Seguir exactamente la referencia enviada.",
-      updatedAt: new Date().toISOString(),
-    },
-  ],
+  guides: [],
 };
 
 function loadData() {
@@ -48,7 +30,28 @@ function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
 
-function appStyles() {
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function formatBytes(bytes) {
+  if (!bytes) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let size = bytes;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  return `${size.toFixed(size >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+function styles() {
   return {
     page: {
       minHeight: "100vh",
@@ -58,7 +61,7 @@ function appStyles() {
         'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
     },
     wrap: {
-      maxWidth: 1200,
+      maxWidth: 1280,
       margin: "0 auto",
       padding: 24,
     },
@@ -68,6 +71,12 @@ function appStyles() {
       borderRadius: 18,
       padding: 18,
       boxShadow: "0 10px 30px rgba(0,0,0,0.18)",
+    },
+    label: {
+      display: "block",
+      marginBottom: 8,
+      fontSize: 14,
+      opacity: 0.9,
     },
     input: {
       width: "100%",
@@ -119,6 +128,15 @@ function appStyles() {
       color: "#fff",
       fontWeight: 600,
     },
+    buttonDanger: {
+      padding: "12px 16px",
+      borderRadius: 12,
+      border: "1px solid rgba(239,68,68,0.35)",
+      cursor: "pointer",
+      background: "rgba(127,29,29,0.2)",
+      color: "#fca5a5",
+      fontWeight: 600,
+    },
     badge: {
       display: "inline-block",
       padding: "6px 10px",
@@ -128,25 +146,30 @@ function appStyles() {
       border: "1px solid rgba(255,255,255,0.08)",
       color: "#d1d5db",
     },
+    helper: {
+      fontSize: 13,
+      opacity: 0.72,
+      marginTop: 6,
+      lineHeight: 1.45,
+    },
   };
 }
 
 function AdminView({ data, setData }) {
-  const s = appStyles();
-
+  const s = styles();
   const [form, setForm] = useState({
     id: "",
     station: "p1",
     title: "",
     type: "image",
-    file: "",
     notes: "",
   });
+  const [fileState, setFileState] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
 
   const sortedGuides = useMemo(() => {
-    return [...data.guides].sort((a, b) => {
-      return a.station.localeCompare(b.station);
-    });
+    return [...data.guides].sort((a, b) => a.station.localeCompare(b.station));
   }, [data.guides]);
 
   function resetForm() {
@@ -155,41 +178,99 @@ function AdminView({ data, setData }) {
       station: "p1",
       title: "",
       type: "image",
-      file: "",
       notes: "",
     });
+    setFileState(null);
+    setMessage("");
   }
 
-  function saveGuide() {
-    if (!form.station || !form.title || !form.type || !form.file) {
-      alert("Completa estación, título, tipo y URL.");
+  async function handleFileChange(event) {
+    const file = event.target.files?.[0];
+    setMessage("");
+    if (!file) {
+      setFileState(null);
       return;
     }
 
-    const payload = {
-      id: form.id || uid(),
-      station: form.station,
-      title: form.title,
-      type: form.type,
-      file: form.file,
-      notes: form.notes,
-      updatedAt: new Date().toISOString(),
-    };
-
-    let nextGuides;
-    const exists = data.guides.some((g) => g.id === payload.id);
-
-    if (exists) {
-      nextGuides = data.guides.map((g) => (g.id === payload.id ? payload : g));
-    } else {
-      const withoutSameStation = data.guides.filter((g) => g.station !== payload.station);
-      nextGuides = [payload, ...withoutSameStation];
+    const maxBytes = MAX_FILE_SIZE_MB * 1024 * 1024;
+    if (file.size > maxBytes) {
+      setMessage(`El archivo supera ${MAX_FILE_SIZE_MB} MB.`);
+      setFileState(null);
+      return;
     }
 
-    const next = { ...data, guides: nextGuides };
-    setData(next);
-    saveData(next);
-    resetForm();
+    const detectedType = file.type === "application/pdf" ? "pdf" : "image";
+
+    if (!file.type.startsWith("image/") && file.type !== "application/pdf") {
+      setMessage("Solo se permiten imágenes o PDFs.");
+      setFileState(null);
+      return;
+    }
+
+    try {
+      const dataUrl = await fileToDataUrl(file);
+      setFileState({
+        name: file.name,
+        size: file.size,
+        mimeType: file.type,
+        dataUrl,
+      });
+      setForm((prev) => ({ ...prev, type: detectedType }));
+    } catch {
+      setMessage("No se pudo leer el archivo.");
+      setFileState(null);
+    }
+  }
+
+  async function saveGuide() {
+    setMessage("");
+    if (!form.station || !form.title) {
+      setMessage("Completa estación y título.");
+      return;
+    }
+
+    const editingExisting = Boolean(form.id);
+    const existingGuide = data.guides.find((g) => g.id === form.id);
+
+    if (!fileState && !editingExisting) {
+      setMessage("Debes subir una imagen o un PDF.");
+      return;
+    }
+
+    setSaving(true);
+
+    try {
+      const payload = {
+        id: form.id || uid(),
+        station: form.station,
+        title: form.title,
+        type: fileState ? form.type : existingGuide?.type || "image",
+        notes: form.notes,
+        fileName: fileState ? fileState.name : existingGuide?.fileName || "",
+        fileSize: fileState ? fileState.size : existingGuide?.fileSize || 0,
+        mimeType: fileState ? fileState.mimeType : existingGuide?.mimeType || "",
+        fileData: fileState ? fileState.dataUrl : existingGuide?.fileData || "",
+        updatedAt: new Date().toISOString(),
+      };
+
+      let nextGuides;
+      const exists = data.guides.some((g) => g.id === payload.id);
+
+      if (exists) {
+        nextGuides = data.guides.map((g) => (g.id === payload.id ? payload : g));
+      } else {
+        const withoutSameStation = data.guides.filter((g) => g.station !== payload.station);
+        nextGuides = [payload, ...withoutSameStation];
+      }
+
+      const next = { ...data, guides: nextGuides };
+      setData(next);
+      saveData(next);
+      resetForm();
+      setMessage("Guía guardada correctamente.");
+    } finally {
+      setSaving(false);
+    }
   }
 
   function editGuide(guide) {
@@ -198,9 +279,15 @@ function AdminView({ data, setData }) {
       station: guide.station,
       title: guide.title,
       type: guide.type,
-      file: guide.file,
       notes: guide.notes || "",
     });
+    setFileState({
+      name: guide.fileName,
+      size: guide.fileSize,
+      mimeType: guide.mimeType,
+      dataUrl: guide.fileData,
+    });
+    setMessage("");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -213,9 +300,12 @@ function AdminView({ data, setData }) {
     saveData(next);
   }
 
-  function loadDemo() {
-    setData(initialData);
-    saveData(initialData);
+  function clearAll() {
+    const next = { ...data, guides: [] };
+    setData(next);
+    saveData(next);
+    resetForm();
+    setMessage("Todas las guías se han eliminado.");
   }
 
   return (
@@ -236,25 +326,28 @@ function AdminView({ data, setData }) {
               Bestamping
             </div>
             <h1 style={{ margin: "6px 0 0 0", fontSize: 34 }}>Panel de guías de estampación</h1>
+            <div style={{ marginTop: 8, opacity: 0.75, lineHeight: 1.5 }}>
+              Sube una imagen o un PDF desde tu ordenador y asígnalo a una tablet.
+            </div>
           </div>
-          <button style={s.buttonAlt} onClick={loadDemo}>
-            Cargar demo
+          <button style={s.buttonDanger} onClick={clearAll}>
+            Borrar todas las guías
           </button>
         </div>
 
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "1.1fr 1fr",
+            gridTemplateColumns: "minmax(320px, 1.05fr) minmax(300px, 0.95fr)",
             gap: 20,
           }}
         >
           <div style={s.card}>
-            <h2 style={{ marginTop: 0 }}>Asignar guía a una tablet</h2>
+            <h2 style={{ marginTop: 0 }}>Subir guía a una estación</h2>
 
             <div style={{ display: "grid", gap: 14 }}>
               <div>
-                <label>Estación</label>
+                <label style={s.label}>Estación</label>
                 <select
                   style={s.select}
                   value={form.station}
@@ -269,7 +362,7 @@ function AdminView({ data, setData }) {
               </div>
 
               <div>
-                <label>Título</label>
+                <label style={s.label}>Título</label>
                 <input
                   style={s.input}
                   value={form.title}
@@ -279,29 +372,30 @@ function AdminView({ data, setData }) {
               </div>
 
               <div>
-                <label>Tipo de archivo</label>
-                <select
-                  style={s.select}
-                  value={form.type}
-                  onChange={(e) => setForm({ ...form, type: e.target.value })}
-                >
-                  <option value="image">Imagen</option>
-                  <option value="pdf">PDF</option>
-                </select>
-              </div>
-
-              <div>
-                <label>URL de la imagen o PDF</label>
+                <label style={s.label}>Archivo</label>
                 <input
+                  type="file"
+                  accept="image/*,application/pdf"
                   style={s.input}
-                  value={form.file}
-                  onChange={(e) => setForm({ ...form, file: e.target.value })}
-                  placeholder="https://..."
+                  onChange={handleFileChange}
                 />
+                <div style={s.helper}>
+                  Puedes subir una imagen o PDF directamente desde tu ordenador. Límite recomendado: {MAX_FILE_SIZE_MB} MB.
+                </div>
+                {fileState ? (
+                  <div style={{ ...s.helper, color: "#c7d2fe" }}>
+                    Archivo cargado: <strong>{fileState.name}</strong> · {formatBytes(fileState.size)}
+                  </div>
+                ) : null}
               </div>
 
               <div>
-                <label>Notas</label>
+                <label style={s.label}>Tipo detectado</label>
+                <input style={s.input} value={form.type === "pdf" ? "PDF" : "Imagen"} readOnly />
+              </div>
+
+              <div>
+                <label style={s.label}>Notas</label>
                 <textarea
                   style={s.textarea}
                   value={form.notes}
@@ -311,12 +405,28 @@ function AdminView({ data, setData }) {
               </div>
 
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <button style={s.button} onClick={saveGuide}>
-                  {form.id ? "Guardar cambios" : "Asignar guía"}
+                <button style={s.button} onClick={saveGuide} disabled={saving}>
+                  {saving ? "Guardando..." : form.id ? "Guardar cambios" : "Asignar guía"}
                 </button>
                 <button style={s.buttonAlt} onClick={resetForm}>
                   Limpiar
                 </button>
+              </div>
+
+              {message ? <div style={{ ...s.helper, color: "#fde68a" }}>{message}</div> : null}
+
+              <div
+                style={{
+                  marginTop: 6,
+                  padding: 14,
+                  borderRadius: 14,
+                  background: "rgba(251,191,36,0.08)",
+                  border: "1px solid rgba(251,191,36,0.2)",
+                  lineHeight: 1.5,
+                  fontSize: 14,
+                }}
+              >
+                Esta versión guarda los archivos dentro del navegador con <strong>localStorage</strong>. Sirve para pruebas y demo, pero <strong>no sincroniza entre tablets distintas</strong>. Para uso real multi-tablet hay que pasar al siguiente paso: almacenamiento compartido.
               </div>
             </div>
           </div>
@@ -404,7 +514,7 @@ function AdminView({ data, setData }) {
                   >
                     {guide.type === "image" ? (
                       <img
-                        src={guide.file}
+                        src={guide.fileData}
                         alt={guide.title}
                         style={{ width: "100%", height: "100%", objectFit: "contain" }}
                       />
@@ -412,6 +522,7 @@ function AdminView({ data, setData }) {
                       <div style={{ padding: 12, textAlign: "center", opacity: 0.85 }}>
                         <div style={{ fontSize: 48 }}>📄</div>
                         <div>PDF</div>
+                        <div style={{ fontSize: 12, opacity: 0.75, marginTop: 8 }}>{guide.fileName}</div>
                       </div>
                     )}
                   </div>
@@ -422,7 +533,8 @@ function AdminView({ data, setData }) {
                       <span style={s.badge}>{guide.station}</span>
                       <span style={s.badge}>{guide.type === "image" ? "Imagen" : "PDF"}</span>
                     </div>
-                    <div style={{ opacity: 0.8, marginTop: 8, wordBreak: "break-all" }}>{guide.file}</div>
+                    <div style={{ opacity: 0.8, marginTop: 8 }}>{guide.fileName}</div>
+                    <div style={{ opacity: 0.65, marginTop: 6, fontSize: 13 }}>{formatBytes(guide.fileSize)}</div>
                     {guide.notes ? <div style={{ marginTop: 10, opacity: 0.9 }}>{guide.notes}</div> : null}
                   </div>
 
@@ -430,10 +542,7 @@ function AdminView({ data, setData }) {
                     <button style={s.buttonAlt} onClick={() => editGuide(guide)}>
                       Editar
                     </button>
-                    <button
-                      style={{ ...s.buttonAlt, borderColor: "rgba(239,68,68,0.35)", color: "#fca5a5" }}
-                      onClick={() => deleteGuide(guide.id)}
-                    >
+                    <button style={s.buttonDanger} onClick={() => deleteGuide(guide.id)}>
                       Borrar
                     </button>
                   </div>
@@ -450,19 +559,6 @@ function AdminView({ data, setData }) {
 function StationView({ data, stationId }) {
   const guide = data.guides.find((g) => g.station === stationId);
   const station = data.stations.find((s) => s.id === stationId);
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const latest = loadData();
-      const currentSerialized = JSON.stringify(data);
-      const latestSerialized = JSON.stringify(latest);
-      if (latestSerialized !== currentSerialized) {
-        window.location.reload();
-      }
-    }, 3000);
-
-    return () => clearInterval(interval);
-  }, [data]);
 
   if (!guide) {
     return (
@@ -527,7 +623,7 @@ function StationView({ data, stationId }) {
 
         <iframe
           title={guide.title}
-          src={guide.file}
+          src={guide.fileData}
           style={{
             width: "100%",
             height: "100%",
@@ -577,7 +673,7 @@ function StationView({ data, stationId }) {
       </div>
 
       <img
-        src={guide.file}
+        src={guide.fileData}
         alt={guide.title}
         style={{
           width: "100%",
