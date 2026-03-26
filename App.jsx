@@ -1,144 +1,100 @@
-import { useEffect, useState } from "react";
+import React, { useState, useEffect } from "react";
 import { supabase } from "./supabase";
 
-const STATIONS = ["p1", "p2", "p3", "p4"];
-
-export default function App() {
-  const [guides, setGuides] = useState({});
-  const [selectedStation, setSelectedStation] = useState("p1");
+function App() {
   const [file, setFile] = useState(null);
-  const [title, setTitle] = useState("");
-  const [notes, setNotes] = useState("");
+  const [guides, setGuides] = useState([]);
 
-  // Cargar datos
   useEffect(() => {
     fetchGuides();
-
-    const channel = supabase
-      .channel("realtime-guides")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "guides" },
-        () => {
-          fetchGuides();
-        }
-      )
-      .subscribe();
-
-    return () => supabase.removeChannel(channel);
   }, []);
 
-  async function fetchGuides() {
-    const { data } = await supabase.from("guides").select("*");
+  const fetchGuides = async () => {
+    const { data, error } = await supabase
+      .from("guides")
+      .select("*")
+      .order("created_at", { ascending: false });
 
-    const map = {};
-    data?.forEach((g) => {
-      map[g.station] = g;
-    });
+    if (!error) setGuides(data);
+  };
 
-    setGuides(map);
-  }
-
-  async function handleUpload() {
+  const handleUpload = async () => {
     if (!file) return;
 
-    const filePath = `${selectedStation}/${Date.now()}-${file.name}`;
+    const fileExt = file.name.split(".").pop();
+    const fileName = `${Date.now()}.${fileExt}`;
+    const filePath = fileName;
 
-    // Subir archivo
+    // subir archivo
     const { error: uploadError } = await supabase.storage
       .from("guides")
-      .upload(filePath, file, {
-        contentType: file.type,
-        upsert: true,
-      });
+      .upload(filePath, file);
 
     if (uploadError) {
       alert("Error subiendo archivo");
       return;
     }
 
+    // obtener URL pública
     const { data } = supabase.storage
       .from("guides")
       .getPublicUrl(filePath);
 
-    const type = file.type === "application/pdf" ? "pdf" : "image";
+    const fileUrl = data.publicUrl;
 
-    // Insert o update
-    const { error } = await supabase.from("guides").upsert({
-      station: selectedStation,
-      title: title || file.name,
-      notes,
-      file_url: data.publicUrl,
-      file_path: filePath,
-      type,
-      updated_at: new Date(),
-    });
+    // guardar en DB
+    await supabase.from("guides").insert([
+      {
+        station: "default",
+        title: file.name,
+        file_url: fileUrl,
+        file_path: filePath,
+        type: file.type.includes("pdf") ? "pdf" : "image",
+      },
+    ]);
 
-    if (error) {
-      alert("Error guardando en base de datos");
-    } else {
-      setFile(null);
-      setTitle("");
-      setNotes("");
-    }
-  }
+    setFile(null);
+    fetchGuides();
+  };
 
   return (
-    <div style={{ padding: 20, fontFamily: "Arial" }}>
-      <h1>Bestamping · Control de Producción</h1>
+    <div style={{ padding: 20 }}>
+      <h1>BeStamping Guides</h1>
 
-      {/* Selector */}
-      <select
-        value={selectedStation}
-        onChange={(e) => setSelectedStation(e.target.value)}
-      >
-        {STATIONS.map((s) => (
-          <option key={s}>{s}</option>
-        ))}
-      </select>
+      <input
+        type="file"
+        accept="image/*,.pdf"
+        onChange={(e) => setFile(e.target.files[0])}
+      />
 
-      {/* Subida */}
-      <div style={{ marginTop: 20 }}>
-        <input type="file" onChange={(e) => setFile(e.target.files[0])} />
-        <input
-          placeholder="Título"
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-        />
-        <input
-          placeholder="Notas"
-          value={notes}
-          onChange={(e) => setNotes(e.target.value)}
-        />
-        <button onClick={handleUpload}>Subir</button>
-      </div>
+      <button onClick={handleUpload} style={{ marginLeft: 10 }}>
+        Subir
+      </button>
 
-      {/* Visual */}
-      <div style={{ marginTop: 40 }}>
-        {STATIONS.map((s) => {
-          const g = guides[s];
-          return (
-            <div key={s} style={{ marginBottom: 40 }}>
-              <h2>{s}</h2>
+      <hr />
 
-              {g ? (
-                <>
-                  <p>{g.title}</p>
-                  <p>{g.notes}</p>
+      {guides.map((g) => (
+        <div key={g.id} style={{ marginBottom: 30 }}>
+          <h3>{g.title}</h3>
 
-                  {g.type === "image" ? (
-                    <img src={g.file_url} width="300" />
-                  ) : (
-                    <iframe src={g.file_url} width="400" height="500" />
-                  )}
-                </>
-              ) : (
-                <p>Sin guía</p>
-              )}
-            </div>
-          );
-        })}
-      </div>
+          {g.type === "image" ? (
+            <img
+              src={g.file_url}
+              alt=""
+              style={{ width: "100%", maxWidth: 400 }}
+            />
+          ) : (
+            <iframe
+              src={g.file_url}
+              title="pdf"
+              width="100%"
+              height="500px"
+            />
+          )}
+        </div>
+      ))}
     </div>
   );
 }
+
+export default App;
