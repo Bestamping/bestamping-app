@@ -13,9 +13,21 @@ const STATUS_LABELS = {
   done: "Finalizado",
 };
 
+function getStationFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const station = params.get("station");
+  if (STATIONS.some((s) => s.id === station)) return station;
+  return null;
+}
+
 export default function App() {
-  const [mode, setMode] = useState("manager"); // manager | operator
-  const [selectedStation, setSelectedStation] = useState("plancha1");
+  const stationFromUrl = getStationFromUrl();
+  const lockedToStation = !!stationFromUrl;
+
+  const [mode, setMode] = useState(stationFromUrl ? "operator" : "manager");
+  const [selectedStation, setSelectedStation] = useState(
+    stationFromUrl || "plancha1"
+  );
 
   const [jobs, setJobs] = useState([]);
   const [loadingJobs, setLoadingJobs] = useState(true);
@@ -31,6 +43,7 @@ export default function App() {
 
   useEffect(() => {
     fetchJobs();
+
     const channel = supabase
       .channel("production-jobs-realtime")
       .on(
@@ -72,17 +85,25 @@ export default function App() {
 
   async function fetchJobs() {
     setLoadingJobs(true);
-    const { data, error } = await supabase
+
+    let query = supabase
       .from("production_jobs")
       .select("*")
       .order("sort_order", { ascending: true })
       .order("created_at", { ascending: true });
+
+    if (lockedToStation) {
+      query = query.eq("station", selectedStation);
+    }
+
+    const { data, error } = await query;
 
     if (error) {
       console.error("Error loading jobs:", error);
     } else {
       setJobs(data || []);
     }
+
     setLoadingJobs(false);
   }
 
@@ -204,32 +225,10 @@ export default function App() {
         setImageZoom(1);
       }
 
-      await normalizeQueue(job.station);
       await fetchJobs();
     } catch (error) {
       console.error(error);
       alert("No se pudo finalizar el trabajo.");
-    }
-  }
-
-  async function normalizeQueue(stationId) {
-    const list = [...jobs]
-      .filter((j) => j.station === stationId)
-      .sort((a, b) => {
-        const aOrder = a.sort_order ?? 0;
-        const bOrder = b.sort_order ?? 0;
-        if (aOrder !== bOrder) return aOrder - bOrder;
-        return new Date(a.created_at) - new Date(b.created_at);
-      });
-
-    for (let i = 0; i < list.length; i++) {
-      const desiredOrder = i + 1;
-      if (list[i].sort_order !== desiredOrder) {
-        await supabase
-          .from("production_jobs")
-          .update({ sort_order: desiredOrder })
-          .eq("id", list[i].id);
-      }
     }
   }
 
@@ -298,29 +297,35 @@ export default function App() {
       <header style={styles.header}>
         <div>
           <h1 style={styles.title}>Production Queue</h1>
-          <p style={styles.subtitle}>Cola de trabajos por plancha</p>
+          <p style={styles.subtitle}>
+            {lockedToStation
+              ? `Vista fija: ${stationName(selectedStation)}`
+              : "Cola de trabajos por plancha"}
+          </p>
         </div>
 
-        <div style={styles.topButtons}>
-          <button
-            style={{
-              ...styles.modeButton,
-              ...(mode === "manager" ? styles.modeButtonActive : {}),
-            }}
-            onClick={() => setMode("manager")}
-          >
-            Gestor
-          </button>
-          <button
-            style={{
-              ...styles.modeButton,
-              ...(mode === "operator" ? styles.modeButtonActive : {}),
-            }}
-            onClick={() => setMode("operator")}
-          >
-            Operario
-          </button>
-        </div>
+        {!lockedToStation && (
+          <div style={styles.topButtons}>
+            <button
+              style={{
+                ...styles.modeButton,
+                ...(mode === "manager" ? styles.modeButtonActive : {}),
+              }}
+              onClick={() => setMode("manager")}
+            >
+              Gestor
+            </button>
+            <button
+              style={{
+                ...styles.modeButton,
+                ...(mode === "operator" ? styles.modeButtonActive : {}),
+              }}
+              onClick={() => setMode("operator")}
+            >
+              Operario
+            </button>
+          </div>
+        )}
       </header>
 
       <div style={styles.main}>
@@ -387,20 +392,17 @@ export default function App() {
             </section>
 
             <section style={styles.card}>
-              <h2 style={styles.sectionTitle}>Resumen de colas</h2>
+              <h2 style={styles.sectionTitle}>URLs de cada plancha</h2>
 
-              <div style={styles.stationSummaryGrid}>
+              <div style={{ display: "grid", gap: 12 }}>
                 {STATIONS.map((s) => {
-                  const list = jobsByStation[s.id] || [];
-                  const pending = list.filter((j) => j.status === "pending").length;
-                  const inProgress = list.filter((j) => j.status === "in_progress").length;
-
+                  const url = `${window.location.origin}${window.location.pathname}?station=${s.id}`;
                   return (
-                    <div key={s.id} style={styles.summaryBox}>
-                      <div style={styles.summaryTitle}>{s.name}</div>
-                      <div style={styles.summaryStat}>Total: {list.length}</div>
-                      <div style={styles.summaryStat}>En cola: {pending}</div>
-                      <div style={styles.summaryStat}>En proceso: {inProgress}</div>
+                    <div key={s.id} style={styles.urlBox}>
+                      <div style={{ fontWeight: 700, marginBottom: 6 }}>
+                        {s.name}
+                      </div>
+                      <div style={styles.urlText}>{url}</div>
                     </div>
                   );
                 })}
@@ -436,30 +438,32 @@ export default function App() {
           </div>
         ) : (
           <div style={styles.operatorLayout}>
-            <aside style={styles.sidebar}>
-              <h2 style={styles.sectionTitle}>Planchas</h2>
-              <div style={styles.stationTabs}>
-                {STATIONS.map((s) => (
-                  <button
-                    key={s.id}
-                    style={{
-                      ...styles.stationTab,
-                      ...(selectedStation === s.id ? styles.stationTabActive : {}),
-                    }}
-                    onClick={() => {
-                      setSelectedStation(s.id);
-                      setActiveJob(null);
-                      setImageZoom(1);
-                    }}
-                  >
-                    {s.name}
-                    <span style={styles.badge}>
-                      {jobsByStation[s.id]?.length || 0}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </aside>
+            {!lockedToStation && (
+              <aside style={styles.sidebar}>
+                <h2 style={styles.sectionTitle}>Planchas</h2>
+                <div style={styles.stationTabs}>
+                  {STATIONS.map((s) => (
+                    <button
+                      key={s.id}
+                      style={{
+                        ...styles.stationTab,
+                        ...(selectedStation === s.id ? styles.stationTabActive : {}),
+                      }}
+                      onClick={() => {
+                        setSelectedStation(s.id);
+                        setActiveJob(null);
+                        setImageZoom(1);
+                      }}
+                    >
+                      {s.name}
+                      <span style={styles.badge}>
+                        {jobsByStation[s.id]?.length || 0}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </aside>
+            )}
 
             <section style={styles.queuePanel}>
               <div style={styles.queueHeader}>
@@ -468,7 +472,9 @@ export default function App() {
                     Cola {stationName(selectedStation)}
                   </h2>
                   <p style={styles.muted}>
-                    El operario puede elegir cualquier trabajo de la cola.
+                    {lockedToStation
+                      ? "Esta pantalla está fijada a esta plancha por URL."
+                      : "El operario puede elegir cualquier trabajo de la cola."}
                   </p>
                 </div>
               </div>
@@ -698,7 +704,7 @@ const styles = {
   },
   operatorLayout: {
     display: "grid",
-    gridTemplateColumns: "260px 1fr",
+    gridTemplateColumns: "1fr",
     gap: 24,
   },
   sidebar: {
@@ -785,29 +791,11 @@ const styles = {
     fontWeight: 700,
     minWidth: 38,
   },
-  stationSummaryGrid: {
-    display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-    gap: 16,
-  },
-  summaryBox: {
-    border: "1px solid #e5e7eb",
-    borderRadius: 16,
-    padding: 16,
-    background: "#fafafa",
-  },
-  summaryTitle: {
-    fontWeight: 700,
-    marginBottom: 8,
-  },
-  summaryStat: {
-    color: "#4b5563",
-    marginBottom: 4,
-  },
   managerJobList: {
     display: "flex",
     flexDirection: "column",
     gap: 12,
+    marginTop: 20,
   },
   jobRow: {
     display: "flex",
@@ -985,5 +973,16 @@ const styles = {
     borderRadius: 12,
     textDecoration: "none",
     fontWeight: 600,
+  },
+  urlBox: {
+    border: "1px solid #e5e7eb",
+    borderRadius: 14,
+    padding: 12,
+    background: "#fafafa",
+  },
+  urlText: {
+    fontSize: 13,
+    color: "#374151",
+    wordBreak: "break-all",
   },
 };
