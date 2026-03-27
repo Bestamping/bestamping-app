@@ -28,8 +28,10 @@ function App() {
     // subir archivo
     const { error: uploadError } = await supabase.storage
       .from("guides")
-      .upload(filePath, file);
-
+.upload(filePath, file, {
+  upsert: true,
+  contentType: file.type,
+});
     if (uploadError) {
       alert("Error subiendo archivo");
       return;
