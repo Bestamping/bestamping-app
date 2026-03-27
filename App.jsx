@@ -1,46 +1,43 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "./supabase";
 
 const STATIONS = [
-  { id: "p1", name: "Plancha 1" },
-  { id: "p2", name: "Plancha 2" },
-  { id: "p3", name: "Plancha 3" },
-  { id: "p4", name: "Plancha 4" },
+  { id: "plancha1", name: "Plancha 1" },
+  { id: "plancha2", name: "Plancha 2" },
+  { id: "plancha3", name: "Plancha 3" },
 ];
 
-const APP_BG = "#091224";
+const STATUS_LABELS = {
+  pending: "En cola",
+  in_progress: "En proceso",
+  done: "Finalizado",
+};
 
 export default function App() {
-  const params = new URLSearchParams(window.location.search);
-  const view = params.get("view");
-  const stationId = params.get("station") || "p1";
+  const [mode, setMode] = useState("manager"); // manager | operator
+  const [selectedStation, setSelectedStation] = useState("plancha1");
 
-  if (view === "station") {
-    return <StationScreen stationId={stationId} />;
-  }
+  const [jobs, setJobs] = useState([]);
+  const [loadingJobs, setLoadingJobs] = useState(true);
 
-  return <AdminScreen />;
-}
-
-function AdminScreen() {
-  const [guides, setGuides] = useState([]);
-  const [selectedStation, setSelectedStation] = useState("p1");
   const [title, setTitle] = useState("");
   const [notes, setNotes] = useState("");
+  const [station, setStation] = useState("plancha1");
   const [file, setFile] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState("");
+  const [uploading, setUploading] = useState(false);
+
+  const [activeJob, setActiveJob] = useState(null);
+  const [imageZoom, setImageZoom] = useState(1);
 
   useEffect(() => {
-    fetchGuides();
-
+    fetchJobs();
     const channel = supabase
-      .channel("guides-realtime-admin")
+      .channel("production-jobs-realtime")
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "guides" },
+        { event: "*", schema: "public", table: "production_jobs" },
         () => {
-          fetchGuides();
+          fetchJobs();
         }
       )
       .subscribe();
@@ -50,766 +47,943 @@ function AdminScreen() {
     };
   }, []);
 
-  async function fetchGuides() {
-    const { data, error } = await supabase
-      .from("guides")
-      .select("*")
-      .order("station", { ascending: true });
+  const jobsByStation = useMemo(() => {
+    const grouped = {
+      plancha1: [],
+      plancha2: [],
+      plancha3: [],
+    };
 
-    if (error) {
-      console.error(error);
-      setMessage("Error cargando guías");
-      return;
+    const sorted = [...jobs].sort((a, b) => {
+      const aOrder = a.sort_order ?? 0;
+      const bOrder = b.sort_order ?? 0;
+      if (aOrder !== bOrder) return aOrder - bOrder;
+      return new Date(a.created_at) - new Date(b.created_at);
+    });
+
+    for (const job of sorted) {
+      if (grouped[job.station]) grouped[job.station].push(job);
     }
 
-    setGuides(data || []);
+    return grouped;
+  }, [jobs]);
+
+  const stationJobs = jobsByStation[selectedStation] || [];
+
+  async function fetchJobs() {
+    setLoadingJobs(true);
+    const { data, error } = await supabase
+      .from("production_jobs")
+      .select("*")
+      .order("sort_order", { ascending: true })
+      .order("created_at", { ascending: true });
+
+    if (error) {
+      console.error("Error loading jobs:", error);
+    } else {
+      setJobs(data || []);
+    }
+    setLoadingJobs(false);
   }
 
-  async function handleUpload() {
-    setMessage("");
+  async function getNextSortOrder(stationId) {
+    const stationList = jobs.filter((j) => j.station === stationId);
+    if (!stationList.length) return 1;
+    return Math.max(...stationList.map((j) => j.sort_order || 0)) + 1;
+  }
+
+  async function handleUpload(e) {
+    e.preventDefault();
+
+    if (!title.trim()) {
+      alert("Pon un título al trabajo.");
+      return;
+    }
 
     if (!file) {
-      setMessage("Selecciona un archivo.");
+      alert("Selecciona un archivo.");
       return;
     }
-
-    if (!selectedStation) {
-      setMessage("Selecciona una plancha.");
-      return;
-    }
-
-    setLoading(true);
 
     try {
-      const existingGuide = guides.find((g) => g.station === selectedStation);
+      setUploading(true);
 
+      const ext = file.name.split(".").pop()?.toLowerCase() || "";
       const safeName = file.name.replace(/\s+/g, "_");
-      const fileName = `${Date.now()}_${safeName}`;
-      const filePath = `uploads/${selectedStation}/${fileName}`;
+      const filePath = `${station}/${Date.now()}_${safeName}`;
 
       const { error: uploadError } = await supabase.storage
-        .from("guides")
+        .from("job-files")
         .upload(filePath, file, {
-          upsert: true,
-          contentType: file.type,
+          cacheControl: "3600",
+          upsert: false,
         });
 
-      if (uploadError) {
-        console.error(uploadError);
-        setMessage(`Error subiendo archivo: ${uploadError.message}`);
-        setLoading(false);
-        return;
-      }
+      if (uploadError) throw uploadError;
 
-      const { data: publicUrlData } = supabase.storage
-        .from("guides")
-        .getPublicUrl(filePath);
+      const nextSortOrder = await getNextSortOrder(station);
 
-      const fileUrl = publicUrlData.publicUrl;
-      const type = file.type === "application/pdf" ? "pdf" : "image";
+      const { error: insertError } = await supabase
+        .from("production_jobs")
+        .insert({
+          title: title.trim(),
+          notes: notes.trim() || null,
+          station,
+          file_path: filePath,
+          file_name: file.name,
+          file_type: file.type || `application/${ext}`,
+          status: "pending",
+          sort_order: nextSortOrder,
+        });
 
-      const payload = {
-        station: selectedStation,
-        title: title.trim() || file.name,
-        notes: notes.trim(),
-        file_url: fileUrl,
-        file_path: filePath,
-        type,
-        updated_at: new Date().toISOString(),
-      };
+      if (insertError) throw insertError;
 
-      const { error: dbError } = await supabase
-        .from("guides")
-        .upsert(payload, { onConflict: "station" });
-
-      if (dbError) {
-        console.error(dbError);
-        setMessage(`Error guardando en base de datos: ${dbError.message}`);
-        setLoading(false);
-        return;
-      }
-
-      if (existingGuide?.file_path && existingGuide.file_path !== filePath) {
-        await supabase.storage.from("guides").remove([existingGuide.file_path]);
-      }
-
-      setFile(null);
       setTitle("");
       setNotes("");
-      const fileInput = document.getElementById("guide-file-input");
-      if (fileInput) fileInput.value = "";
+      setStation("plancha1");
+      setFile(null);
 
-      setMessage("Guía subida correctamente.");
-      await fetchGuides();
-    } catch (err) {
-      console.error(err);
-      setMessage("Ha ocurrido un error inesperado.");
+      const input = document.getElementById("file-input");
+      if (input) input.value = "";
+
+      await fetchJobs();
+      alert("Trabajo enviado a la cola.");
+    } catch (error) {
+      console.error(error);
+      alert("Error al subir el trabajo.");
+    } finally {
+      setUploading(false);
     }
-
-    setLoading(false);
   }
 
-  async function handleDeleteGuide(guide) {
-    const ok = window.confirm(`¿Borrar la guía de ${guide.station}?`);
+  function getPublicUrl(path) {
+    const { data } = supabase.storage.from("job-files").getPublicUrl(path);
+    return data?.publicUrl || "";
+  }
+
+  async function startJob(job) {
+    const { error } = await supabase
+      .from("production_jobs")
+      .update({ status: "in_progress" })
+      .eq("id", job.id);
+
+    if (error) {
+      console.error(error);
+      alert("No se pudo marcar como en proceso.");
+      return;
+    }
+
+    setActiveJob(job);
+    await fetchJobs();
+  }
+
+  async function finalizeJob(job) {
+    const ok = window.confirm(
+      `¿Finalizar y borrar "${job.title}" de la cola?`
+    );
     if (!ok) return;
 
-    setMessage("");
-
-    if (guide.file_path) {
+    try {
       const { error: storageError } = await supabase.storage
-        .from("guides")
-        .remove([guide.file_path]);
+        .from("job-files")
+        .remove([job.file_path]);
 
       if (storageError) {
-        console.error(storageError);
+        console.warn("No se pudo borrar el archivo del storage:", storageError);
+      }
+
+      const { error: deleteError } = await supabase
+        .from("production_jobs")
+        .delete()
+        .eq("id", job.id);
+
+      if (deleteError) throw deleteError;
+
+      if (activeJob?.id === job.id) {
+        setActiveJob(null);
+        setImageZoom(1);
+      }
+
+      await normalizeQueue(job.station);
+      await fetchJobs();
+    } catch (error) {
+      console.error(error);
+      alert("No se pudo finalizar el trabajo.");
+    }
+  }
+
+  async function normalizeQueue(stationId) {
+    const list = [...jobs]
+      .filter((j) => j.station === stationId)
+      .sort((a, b) => {
+        const aOrder = a.sort_order ?? 0;
+        const bOrder = b.sort_order ?? 0;
+        if (aOrder !== bOrder) return aOrder - bOrder;
+        return new Date(a.created_at) - new Date(b.created_at);
+      });
+
+    for (let i = 0; i < list.length; i++) {
+      const desiredOrder = i + 1;
+      if (list[i].sort_order !== desiredOrder) {
+        await supabase
+          .from("production_jobs")
+          .update({ sort_order: desiredOrder })
+          .eq("id", list[i].id);
       }
     }
+  }
 
-    const { error } = await supabase
-      .from("guides")
-      .delete()
-      .eq("id", guide.id);
+  async function moveJob(job, direction) {
+    const stationList = [...stationJobs];
+    const index = stationList.findIndex((j) => j.id === job.id);
+    if (index === -1) return;
 
-    if (error) {
+    const targetIndex = direction === "up" ? index - 1 : index + 1;
+    if (targetIndex < 0 || targetIndex >= stationList.length) return;
+
+    const currentJob = stationList[index];
+    const targetJob = stationList[targetIndex];
+
+    const currentOrder = currentJob.sort_order;
+    const targetOrder = targetJob.sort_order;
+
+    try {
+      await supabase
+        .from("production_jobs")
+        .update({ sort_order: -999999 })
+        .eq("id", currentJob.id);
+
+      await supabase
+        .from("production_jobs")
+        .update({ sort_order: currentOrder })
+        .eq("id", targetJob.id);
+
+      await supabase
+        .from("production_jobs")
+        .update({ sort_order: targetOrder })
+        .eq("id", currentJob.id);
+
+      await fetchJobs();
+    } catch (error) {
       console.error(error);
-      setMessage(`Error borrando guía: ${error.message}`);
-      return;
-    }
-
-    setMessage("Guía eliminada.");
-    fetchGuides();
-  }
-
-  const stationMap = useMemo(() => {
-    const map = {};
-    STATIONS.forEach((s) => {
-      map[s.id] = guides.find((g) => g.station === s.id) || null;
-    });
-    return map;
-  }, [guides]);
-
-  return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background: APP_BG,
-        color: "#fff",
-        padding: 24,
-        fontFamily: "Arial, sans-serif",
-      }}
-    >
-      <div style={{ maxWidth: 1200, margin: "0 auto" }}>
-        <h1 style={{ marginTop: 0, marginBottom: 8, fontSize: 42 }}>
-          BeStamping Control
-        </h1>
-        <p style={{ opacity: 0.8, marginTop: 0, marginBottom: 24 }}>
-          Asigna una guía a cada plancha y muéstrala en una tablet.
-        </p>
-
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1.1fr 0.9fr",
-            gap: 24,
-            alignItems: "start",
-          }}
-        >
-          <div style={panelCard}>
-            <h2 style={panelTitle}>Subir guía</h2>
-
-            <div style={{ display: "grid", gap: 14 }}>
-              <div>
-                <label style={labelStyle}>Plancha</label>
-                <select
-                  value={selectedStation}
-                  onChange={(e) => setSelectedStation(e.target.value)}
-                  style={inputStyle}
-                >
-                  {STATIONS.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label style={labelStyle}>Título</label>
-                <input
-                  type="text"
-                  placeholder="Ej: Equipación rosa Snickers"
-                  value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  style={inputStyle}
-                />
-              </div>
-
-              <div>
-                <label style={labelStyle}>Notas</label>
-                <textarea
-                  placeholder="Ej: revisar posición del sponsor, prioridad alta..."
-                  value={notes}
-                  onChange={(e) => setNotes(e.target.value)}
-                  style={{ ...inputStyle, minHeight: 90, resize: "vertical" }}
-                />
-              </div>
-
-              <div>
-                <label style={labelStyle}>Archivo</label>
-                <input
-                  id="guide-file-input"
-                  type="file"
-                  accept="image/*,.pdf,application/pdf"
-                  onChange={(e) => setFile(e.target.files?.[0] || null)}
-                  style={inputStyle}
-                />
-              </div>
-
-              <button
-                onClick={handleUpload}
-                disabled={loading}
-                style={{
-                  ...buttonStyle,
-                  opacity: loading ? 0.7 : 1,
-                  cursor: loading ? "not-allowed" : "pointer",
-                }}
-              >
-                {loading ? "Subiendo..." : "Subir guía"}
-              </button>
-
-              {message ? <div style={messageStyle}>{message}</div> : null}
-            </div>
-          </div>
-
-          <div style={panelCard}>
-            <h2 style={panelTitle}>URLs de tablets</h2>
-
-            <div style={{ display: "grid", gap: 12 }}>
-              {STATIONS.map((s) => {
-                const url = `${window.location.origin}/?view=station&station=${s.id}`;
-                return (
-                  <div key={s.id} style={miniCard}>
-                    <div style={{ fontWeight: 700, marginBottom: 6 }}>
-                      {s.name}
-                    </div>
-                    <div
-                      style={{
-                        wordBreak: "break-all",
-                        fontSize: 13,
-                        opacity: 0.8,
-                        marginBottom: 10,
-                      }}
-                    >
-                      {url}
-                    </div>
-                    <div style={{ display: "flex", gap: 10 }}>
-                      <button
-                        style={smallButtonStyle}
-                        onClick={() => navigator.clipboard.writeText(url)}
-                      >
-                        Copiar URL
-                      </button>
-                      <button
-                        style={smallButtonStyle}
-                        onClick={() => window.open(url, "_blank")}
-                      >
-                        Abrir
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-
-        <div style={{ marginTop: 28 }}>
-          <h2 style={{ fontSize: 30, marginBottom: 18 }}>Guías activas</h2>
-
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-              gap: 20,
-            }}
-          >
-            {STATIONS.map((station) => {
-              const guide = stationMap[station.id];
-
-              return (
-                <div key={station.id} style={guideCard}>
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      gap: 12,
-                      alignItems: "flex-start",
-                    }}
-                  >
-                    <div>
-                      <div style={{ fontWeight: 700, fontSize: 24 }}>
-                        {station.name}
-                      </div>
-                      {!guide ? (
-                        <div style={{ opacity: 0.7, marginTop: 8 }}>
-                          Sin guía asignada
-                        </div>
-                      ) : (
-                        <>
-                          <div
-                            style={{ marginTop: 8, fontWeight: 700, fontSize: 18 }}
-                          >
-                            {guide.title}
-                          </div>
-                          {guide.notes ? (
-                            <div style={{ marginTop: 8, opacity: 0.82 }}>
-                              {guide.notes}
-                            </div>
-                          ) : null}
-                        </>
-                      )}
-                    </div>
-
-                    {guide ? (
-                      <button
-                        onClick={() => handleDeleteGuide(guide)}
-                        style={dangerButtonStyle}
-                      >
-                        Borrar
-                      </button>
-                    ) : null}
-                  </div>
-
-                  {guide ? (
-                    <div style={{ marginTop: 18 }}>
-                      {guide.type === "image" ? (
-                        <img
-                          src={guide.file_url}
-                          alt={guide.title}
-                          style={{
-                            width: "100%",
-                            maxHeight: 360,
-                            objectFit: "contain",
-                            background: "#000",
-                            borderRadius: 10,
-                          }}
-                        />
-                      ) : (
-                        <iframe
-                          src={guide.file_url}
-                          title={guide.title}
-                          style={{
-                            width: "100%",
-                            height: 360,
-                            border: "none",
-                            borderRadius: 10,
-                            background: "#fff",
-                          }}
-                        />
-                      )}
-                    </div>
-                  ) : null}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function StationScreen({ stationId }) {
-  const [guide, setGuide] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [scale, setScale] = useState(1);
-  const pinchStateRef = useRef({
-    startDistance: 0,
-    startScale: 1,
-    pinching: false,
-  });
-
-  const stationName =
-    STATIONS.find((s) => s.id === stationId)?.name || stationId;
-
-  useEffect(() => {
-    fetchGuide();
-
-    const channel = supabase
-      .channel(`guides-realtime-${stationId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "guides",
-          filter: `station=eq.${stationId}`,
-        },
-        () => {
-          fetchGuide();
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [stationId]);
-
-  async function fetchGuide() {
-    setLoading(true);
-
-    const { data, error } = await supabase
-      .from("guides")
-      .select("*")
-      .eq("station", stationId)
-      .maybeSingle();
-
-    if (error) {
-      console.error(error);
-      setGuide(null);
-      setLoading(false);
-      return;
-    }
-
-    setGuide(data || null);
-    setScale(1);
-    setLoading(false);
-  }
-
-  function zoomIn() {
-    setScale((prev) => Math.min(prev + 0.25, 4));
-  }
-
-  function zoomOut() {
-    setScale((prev) => Math.max(prev - 0.25, 1));
-  }
-
-  function resetZoom() {
-    setScale(1);
-  }
-
-  function getTouchDistance(touches) {
-    const dx = touches[0].clientX - touches[1].clientX;
-    const dy = touches[0].clientY - touches[1].clientY;
-    return Math.sqrt(dx * dx + dy * dy);
-  }
-
-  function handleTouchStart(e) {
-    if (e.touches.length === 2) {
-      pinchStateRef.current.startDistance = getTouchDistance(e.touches);
-      pinchStateRef.current.startScale = scale;
-      pinchStateRef.current.pinching = true;
+      alert("No se pudo mover el trabajo.");
     }
   }
 
-  function handleTouchMove(e) {
-    if (e.touches.length === 2 && pinchStateRef.current.pinching) {
-      const newDistance = getTouchDistance(e.touches);
-      const ratio = newDistance / pinchStateRef.current.startDistance;
-      const nextScale = Math.min(
-        Math.max(pinchStateRef.current.startScale * ratio, 1),
-        5
-      );
-      setScale(nextScale);
-    }
+  function openJob(job) {
+    setActiveJob(job);
+    setImageZoom(1);
   }
 
-  function handleTouchEnd(e) {
-    if (e.touches.length < 2) {
-      pinchStateRef.current.pinching = false;
-    }
+  function closeViewer() {
+    setActiveJob(null);
+    setImageZoom(1);
   }
 
-  if (loading) {
+  function isImage(job) {
+    return job?.file_type?.startsWith("image/");
+  }
+
+  function isPdf(job) {
     return (
-      <FullscreenWrap>
-        <div style={{ fontSize: 28 }}>Cargando...</div>
-      </FullscreenWrap>
+      job?.file_type === "application/pdf" ||
+      job?.file_name?.toLowerCase().endsWith(".pdf")
     );
   }
 
-  if (!guide) {
-    return (
-      <FullscreenWrap>
-        <div style={{ textAlign: "center" }}>
-          <div style={{ fontSize: 26, opacity: 0.8 }}>{stationName}</div>
-          <div style={{ fontSize: 42, fontWeight: 700, marginTop: 12 }}>
-            Sin guía asignada
-          </div>
-        </div>
-      </FullscreenWrap>
-    );
-  }
+  const activeJobUrl = activeJob ? getPublicUrl(activeJob.file_path) : "";
 
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background: "#000",
-        color: "#fff",
-        fontFamily: "Arial, sans-serif",
-      }}
-    >
-      <div style={stationHeader}>
+    <div style={styles.app}>
+      <header style={styles.header}>
         <div>
-          <div style={{ fontSize: 14, opacity: 0.8 }}>{stationName}</div>
-          <div style={{ fontSize: 24, fontWeight: 700 }}>{guide.title}</div>
+          <h1 style={styles.title}>Production Queue</h1>
+          <p style={styles.subtitle}>Cola de trabajos por plancha</p>
         </div>
 
-        {guide.notes ? (
-          <div
+        <div style={styles.topButtons}>
+          <button
             style={{
-              maxWidth: "45%",
-              textAlign: "right",
-              fontSize: 15,
-              opacity: 0.9,
+              ...styles.modeButton,
+              ...(mode === "manager" ? styles.modeButtonActive : {}),
             }}
+            onClick={() => setMode("manager")}
           >
-            {guide.notes}
-          </div>
-        ) : null}
-      </div>
-
-      <div
-        style={{
-          paddingTop: 90,
-          width: "100%",
-          height: "100vh",
-          boxSizing: "border-box",
-        }}
-      >
-        {guide.type === "image" ? (
-          <div
-            style={imageViewer}
-            onTouchStart={handleTouchStart}
-            onTouchMove={handleTouchMove}
-            onTouchEnd={handleTouchEnd}
+            Gestor
+          </button>
+          <button
+            style={{
+              ...styles.modeButton,
+              ...(mode === "operator" ? styles.modeButtonActive : {}),
+            }}
+            onClick={() => setMode("operator")}
           >
-            <div style={controlsStyle}>
-              <button onClick={zoomOut} style={zoomBtnStyle}>➖</button>
-              <button onClick={zoomIn} style={zoomBtnStyle}>➕</button>
-              <button onClick={resetZoom} style={zoomBtnStyle}>🔄</button>
-            </div>
+            Operario
+          </button>
+        </div>
+      </header>
 
-            <div
-              style={{
-                width: "100%",
-                minHeight: "100%",
-                display: "flex",
-                justifyContent: "center",
-                alignItems: "flex-start",
-                padding: 20,
-                boxSizing: "border-box",
-              }}
-            >
-              <img
-                src={guide.file_url}
-                alt={guide.title}
-                style={{
-                  display: "block",
-                  width: `${scale * 100}%`,
-                  maxWidth: "none",
-                  height: "auto",
-                  borderRadius: 10,
-                  touchAction: "none",
-                  userSelect: "none",
-                  WebkitUserSelect: "none",
-                  WebkitTouchCallout: "none",
-                }}
-              />
-            </div>
+      <div style={styles.main}>
+        {mode === "manager" ? (
+          <div style={styles.managerLayout}>
+            <section style={styles.card}>
+              <h2 style={styles.sectionTitle}>Nuevo trabajo</h2>
+
+              <form onSubmit={handleUpload} style={styles.form}>
+                <div style={styles.field}>
+                  <label style={styles.label}>Título</label>
+                  <input
+                    style={styles.input}
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    placeholder="Ej: Escudo camiseta infantil"
+                  />
+                </div>
+
+                <div style={styles.field}>
+                  <label style={styles.label}>Notas</label>
+                  <textarea
+                    style={styles.textarea}
+                    value={notes}
+                    onChange={(e) => setNotes(e.target.value)}
+                    placeholder="Indicaciones, tallas, posición, observaciones..."
+                  />
+                </div>
+
+                <div style={styles.field}>
+                  <label style={styles.label}>Plancha</label>
+                  <select
+                    style={styles.input}
+                    value={station}
+                    onChange={(e) => setStation(e.target.value)}
+                  >
+                    {STATIONS.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div style={styles.field}>
+                  <label style={styles.label}>Archivo (JPG, PNG, PDF)</label>
+                  <input
+                    id="file-input"
+                    style={styles.input}
+                    type="file"
+                    accept=".jpg,.jpeg,.png,.pdf,image/*,application/pdf"
+                    onChange={(e) => setFile(e.target.files?.[0] || null)}
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  style={styles.primaryButton}
+                  disabled={uploading}
+                >
+                  {uploading ? "Subiendo..." : "Enviar a la cola"}
+                </button>
+              </form>
+            </section>
+
+            <section style={styles.card}>
+              <h2 style={styles.sectionTitle}>Resumen de colas</h2>
+
+              <div style={styles.stationSummaryGrid}>
+                {STATIONS.map((s) => {
+                  const list = jobsByStation[s.id] || [];
+                  const pending = list.filter((j) => j.status === "pending").length;
+                  const inProgress = list.filter((j) => j.status === "in_progress").length;
+
+                  return (
+                    <div key={s.id} style={styles.summaryBox}>
+                      <div style={styles.summaryTitle}>{s.name}</div>
+                      <div style={styles.summaryStat}>Total: {list.length}</div>
+                      <div style={styles.summaryStat}>En cola: {pending}</div>
+                      <div style={styles.summaryStat}>En proceso: {inProgress}</div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div style={{ marginTop: 20 }}>
+                {loadingJobs ? (
+                  <p>Cargando trabajos...</p>
+                ) : jobs.length === 0 ? (
+                  <p>No hay trabajos en cola.</p>
+                ) : (
+                  <div style={styles.managerJobList}>
+                    {jobs.map((job) => (
+                      <div key={job.id} style={styles.jobRow}>
+                        <div>
+                          <div style={styles.jobTitle}>{job.title}</div>
+                          <div style={styles.jobMeta}>
+                            {stationName(job.station)} · {STATUS_LABELS[job.status]}
+                          </div>
+                        </div>
+                        <button
+                          style={styles.secondaryButton}
+                          onClick={() => openJob(job)}
+                        >
+                          Ver
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </section>
           </div>
         ) : (
-          <div style={pdfViewer}>
-            <a
-              href={guide.file_url}
-              target="_blank"
-              rel="noreferrer"
-              style={pdfButtonStyle}
-            >
-              📄 Abrir PDF
-            </a>
+          <div style={styles.operatorLayout}>
+            <aside style={styles.sidebar}>
+              <h2 style={styles.sectionTitle}>Planchas</h2>
+              <div style={styles.stationTabs}>
+                {STATIONS.map((s) => (
+                  <button
+                    key={s.id}
+                    style={{
+                      ...styles.stationTab,
+                      ...(selectedStation === s.id ? styles.stationTabActive : {}),
+                    }}
+                    onClick={() => {
+                      setSelectedStation(s.id);
+                      setActiveJob(null);
+                      setImageZoom(1);
+                    }}
+                  >
+                    {s.name}
+                    <span style={styles.badge}>
+                      {jobsByStation[s.id]?.length || 0}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </aside>
 
-            <iframe
-              src={guide.file_url}
-              title={guide.title}
-              style={{
-                width: "100%",
-                height: "100%",
-                border: "none",
-                background: "#fff",
-              }}
-            />
+            <section style={styles.queuePanel}>
+              <div style={styles.queueHeader}>
+                <div>
+                  <h2 style={styles.sectionTitle}>
+                    Cola {stationName(selectedStation)}
+                  </h2>
+                  <p style={styles.muted}>
+                    El operario puede elegir cualquier trabajo de la cola.
+                  </p>
+                </div>
+              </div>
+
+              <div style={styles.queueList}>
+                {loadingJobs ? (
+                  <p>Cargando cola...</p>
+                ) : stationJobs.length === 0 ? (
+                  <p>No hay trabajos para esta plancha.</p>
+                ) : (
+                  stationJobs.map((job, index) => (
+                    <div key={job.id} style={styles.queueItem}>
+                      <div style={styles.queueNumber}>{index + 1}</div>
+
+                      <div style={{ flex: 1 }}>
+                        <div style={styles.jobTitle}>{job.title}</div>
+                        <div style={styles.jobMeta}>
+                          {STATUS_LABELS[job.status]} · {job.file_name}
+                        </div>
+                        {job.notes ? (
+                          <div style={styles.jobNotes}>{job.notes}</div>
+                        ) : null}
+                      </div>
+
+                      <div style={styles.queueActions}>
+                        <button
+                          style={styles.smallButton}
+                          onClick={() => moveJob(job, "up")}
+                          disabled={index === 0}
+                        >
+                          ↑
+                        </button>
+                        <button
+                          style={styles.smallButton}
+                          onClick={() => moveJob(job, "down")}
+                          disabled={index === stationJobs.length - 1}
+                        >
+                          ↓
+                        </button>
+                        <button
+                          style={styles.secondaryButton}
+                          onClick={() => openJob(job)}
+                        >
+                          Abrir
+                        </button>
+                        {job.status === "pending" && (
+                          <button
+                            style={styles.primaryButton}
+                            onClick={() => startJob(job)}
+                          >
+                            Empezar
+                          </button>
+                        )}
+                        {job.status === "in_progress" && (
+                          <button
+                            style={styles.dangerButton}
+                            onClick={() => finalizeJob(job)}
+                          >
+                            Finalizar
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
           </div>
         )}
       </div>
+
+      {activeJob && (
+        <div style={styles.modalOverlay} onClick={closeViewer}>
+          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <div>
+                <h3 style={{ margin: 0 }}>{activeJob.title}</h3>
+                <p style={{ margin: "6px 0 0", color: "#666" }}>
+                  {activeJob.file_name}
+                </p>
+              </div>
+
+              <div style={styles.viewerControls}>
+                {isImage(activeJob) && (
+                  <>
+                    <button
+                      style={styles.smallButton}
+                      onClick={() =>
+                        setImageZoom((z) => Math.max(0.5, +(z - 0.1).toFixed(2)))
+                      }
+                    >
+                      -
+                    </button>
+                    <span style={styles.zoomLabel}>{Math.round(imageZoom * 100)}%</span>
+                    <button
+                      style={styles.smallButton}
+                      onClick={() =>
+                        setImageZoom((z) => Math.min(3, +(z + 0.1).toFixed(2)))
+                      }
+                    >
+                      +
+                    </button>
+                  </>
+                )}
+
+                {isPdf(activeJob) && (
+                  <a
+                    href={activeJobUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={styles.linkButton}
+                  >
+                    Abrir PDF
+                  </a>
+                )}
+
+                {activeJob.status === "pending" && mode === "operator" && (
+                  <button
+                    style={styles.primaryButton}
+                    onClick={() => startJob(activeJob)}
+                  >
+                    Empezar
+                  </button>
+                )}
+
+                {activeJob.status === "in_progress" && mode === "operator" && (
+                  <button
+                    style={styles.dangerButton}
+                    onClick={() => finalizeJob(activeJob)}
+                  >
+                    Finalizar
+                  </button>
+                )}
+
+                <button style={styles.secondaryButton} onClick={closeViewer}>
+                  Cerrar
+                </button>
+              </div>
+            </div>
+
+            <div style={styles.viewerArea}>
+              {isImage(activeJob) ? (
+                <div style={styles.imageWrap}>
+                  <img
+                    src={activeJobUrl}
+                    alt={activeJob.title}
+                    style={{
+                      ...styles.viewerImage,
+                      transform: `scale(${imageZoom})`,
+                    }}
+                  />
+                </div>
+              ) : isPdf(activeJob) ? (
+                <iframe
+                  title={activeJob.title}
+                  src={activeJobUrl}
+                  style={styles.viewerIframe}
+                />
+              ) : (
+                <div style={styles.unsupported}>
+                  No se puede previsualizar este tipo de archivo.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function FullscreenWrap({ children }) {
-  return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background: "#000",
-        color: "#fff",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        fontFamily: "Arial, sans-serif",
-        padding: 24,
-      }}
-    >
-      {children}
-    </div>
-  );
+function stationName(id) {
+  return STATIONS.find((s) => s.id === id)?.name || id;
 }
 
-const panelCard = {
-  background: "rgba(255,255,255,0.04)",
-  border: "1px solid rgba(255,255,255,0.08)",
-  borderRadius: 16,
-  padding: 20,
-};
-
-const panelTitle = {
-  marginTop: 0,
-  marginBottom: 16,
-  fontSize: 24,
-};
-
-const miniCard = {
-  padding: 12,
-  borderRadius: 12,
-  background: "rgba(255,255,255,0.05)",
-  border: "1px solid rgba(255,255,255,0.06)",
-};
-
-const guideCard = {
-  background: "rgba(255,255,255,0.04)",
-  border: "1px solid rgba(255,255,255,0.08)",
-  borderRadius: 16,
-  padding: 16,
-};
-
-const messageStyle = {
-  padding: 12,
-  borderRadius: 10,
-  background: "rgba(255,255,255,0.06)",
-  fontSize: 14,
-};
-
-const labelStyle = {
-  display: "block",
-  marginBottom: 6,
-  fontWeight: 700,
-  fontSize: 14,
-};
-
-const inputStyle = {
-  width: "100%",
-  padding: "10px 12px",
-  borderRadius: 10,
-  border: "1px solid rgba(255,255,255,0.12)",
-  background: "rgba(255,255,255,0.06)",
-  color: "#fff",
-  fontSize: 14,
-  boxSizing: "border-box",
-};
-
-const buttonStyle = {
-  border: "none",
-  borderRadius: 12,
-  padding: "12px 16px",
-  background: "#c7d2fe",
-  color: "#111827",
-  fontWeight: 700,
-  fontSize: 15,
-};
-
-const smallButtonStyle = {
-  border: "none",
-  borderRadius: 10,
-  padding: "8px 12px",
-  background: "#dbe4ff",
-  color: "#111827",
-  fontWeight: 700,
-  fontSize: 13,
-  cursor: "pointer",
-};
-
-const dangerButtonStyle = {
-  border: "none",
-  borderRadius: 10,
-  padding: "8px 12px",
-  background: "#fecaca",
-  color: "#7f1d1d",
-  fontWeight: 700,
-  fontSize: 13,
-  cursor: "pointer",
-};
-
-const stationHeader = {
-  position: "fixed",
-  top: 12,
-  left: 12,
-  right: 12,
-  zIndex: 10,
-  display: "flex",
-  justifyContent: "space-between",
-  gap: 16,
-  padding: 14,
-  borderRadius: 14,
-  background: "rgba(0,0,0,0.55)",
-  backdropFilter: "blur(8px)",
-};
-
-const imageViewer = {
-  width: "100%",
-  height: "calc(100vh - 90px)",
-  overflow: "auto",
-  WebkitOverflowScrolling: "touch",
-  background: "#000",
-};
-
-const controlsStyle = {
-  position: "fixed",
-  bottom: 20,
-  left: "50%",
-  transform: "translateX(-50%)",
-  display: "flex",
-  gap: 10,
-  zIndex: 20,
-};
-
-const zoomBtnStyle = {
-  padding: "12px 16px",
-  borderRadius: 12,
-  border: "none",
-  background: "#fff",
-  color: "#111827",
-  fontSize: 18,
-  fontWeight: 700,
-};
-
-const pdfViewer = {
-  width: "100%",
-  height: "calc(100vh - 90px)",
-  background: "#fff",
-  position: "relative",
-};
-
-const pdfButtonStyle = {
-  position: "absolute",
-  top: 12,
-  right: 12,
-  zIndex: 20,
-  padding: "10px 14px",
-  borderRadius: 10,
-  background: "#c7d2fe",
-  color: "#111827",
-  fontWeight: 700,
-  textDecoration: "none",
+const styles = {
+  app: {
+    minHeight: "100vh",
+    background: "#f3f4f6",
+    color: "#111827",
+    fontFamily:
+      '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
+  },
+  header: {
+    padding: "20px 24px",
+    background: "#111827",
+    color: "white",
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 20,
+    flexWrap: "wrap",
+  },
+  title: {
+    margin: 0,
+    fontSize: 28,
+    fontWeight: 700,
+  },
+  subtitle: {
+    margin: "6px 0 0",
+    color: "#d1d5db",
+  },
+  topButtons: {
+    display: "flex",
+    gap: 10,
+  },
+  modeButton: {
+    border: "1px solid #374151",
+    background: "#1f2937",
+    color: "white",
+    padding: "10px 16px",
+    borderRadius: 12,
+    cursor: "pointer",
+    fontWeight: 600,
+  },
+  modeButtonActive: {
+    background: "#2563eb",
+    borderColor: "#2563eb",
+  },
+  main: {
+    padding: 24,
+  },
+  managerLayout: {
+    display: "grid",
+    gridTemplateColumns: "420px 1fr",
+    gap: 24,
+  },
+  operatorLayout: {
+    display: "grid",
+    gridTemplateColumns: "260px 1fr",
+    gap: 24,
+  },
+  sidebar: {
+    background: "white",
+    borderRadius: 20,
+    padding: 20,
+    boxShadow: "0 6px 18px rgba(0,0,0,0.08)",
+    height: "fit-content",
+  },
+  card: {
+    background: "white",
+    borderRadius: 20,
+    padding: 20,
+    boxShadow: "0 6px 18px rgba(0,0,0,0.08)",
+  },
+  sectionTitle: {
+    marginTop: 0,
+    marginBottom: 16,
+    fontSize: 22,
+  },
+  form: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 16,
+  },
+  field: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+  },
+  label: {
+    fontWeight: 600,
+  },
+  input: {
+    border: "1px solid #d1d5db",
+    borderRadius: 12,
+    padding: "12px 14px",
+    fontSize: 14,
+    background: "white",
+  },
+  textarea: {
+    border: "1px solid #d1d5db",
+    borderRadius: 12,
+    padding: "12px 14px",
+    fontSize: 14,
+    minHeight: 100,
+    resize: "vertical",
+    background: "white",
+  },
+  primaryButton: {
+    border: "none",
+    background: "#2563eb",
+    color: "white",
+    padding: "12px 16px",
+    borderRadius: 12,
+    cursor: "pointer",
+    fontWeight: 700,
+  },
+  secondaryButton: {
+    border: "1px solid #d1d5db",
+    background: "white",
+    color: "#111827",
+    padding: "10px 14px",
+    borderRadius: 12,
+    cursor: "pointer",
+    fontWeight: 600,
+  },
+  dangerButton: {
+    border: "none",
+    background: "#dc2626",
+    color: "white",
+    padding: "10px 14px",
+    borderRadius: 12,
+    cursor: "pointer",
+    fontWeight: 700,
+  },
+  smallButton: {
+    border: "1px solid #d1d5db",
+    background: "white",
+    color: "#111827",
+    padding: "8px 10px",
+    borderRadius: 10,
+    cursor: "pointer",
+    fontWeight: 700,
+    minWidth: 38,
+  },
+  stationSummaryGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+    gap: 16,
+  },
+  summaryBox: {
+    border: "1px solid #e5e7eb",
+    borderRadius: 16,
+    padding: 16,
+    background: "#fafafa",
+  },
+  summaryTitle: {
+    fontWeight: 700,
+    marginBottom: 8,
+  },
+  summaryStat: {
+    color: "#4b5563",
+    marginBottom: 4,
+  },
+  managerJobList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 12,
+  },
+  jobRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 12,
+    border: "1px solid #e5e7eb",
+    borderRadius: 14,
+    padding: 14,
+  },
+  jobTitle: {
+    fontWeight: 700,
+    fontSize: 16,
+  },
+  jobMeta: {
+    color: "#6b7280",
+    marginTop: 4,
+    fontSize: 14,
+  },
+  jobNotes: {
+    marginTop: 8,
+    color: "#374151",
+    fontSize: 14,
+  },
+  stationTabs: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 10,
+  },
+  stationTab: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    border: "1px solid #e5e7eb",
+    background: "white",
+    padding: "14px 16px",
+    borderRadius: 14,
+    cursor: "pointer",
+    fontWeight: 700,
+  },
+  stationTabActive: {
+    borderColor: "#2563eb",
+    background: "#eff6ff",
+  },
+  badge: {
+    background: "#111827",
+    color: "white",
+    borderRadius: 999,
+    padding: "4px 10px",
+    fontSize: 12,
+    fontWeight: 700,
+  },
+  queuePanel: {
+    background: "white",
+    borderRadius: 20,
+    padding: 20,
+    boxShadow: "0 6px 18px rgba(0,0,0,0.08)",
+    minHeight: 500,
+  },
+  queueHeader: {
+    marginBottom: 16,
+  },
+  muted: {
+    color: "#6b7280",
+    margin: "6px 0 0",
+  },
+  queueList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 14,
+  },
+  queueItem: {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: 14,
+    border: "1px solid #e5e7eb",
+    borderRadius: 16,
+    padding: 14,
+    background: "#fafafa",
+  },
+  queueNumber: {
+    width: 38,
+    height: 38,
+    minWidth: 38,
+    borderRadius: 999,
+    background: "#111827",
+    color: "white",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontWeight: 700,
+  },
+  queueActions: {
+    display: "flex",
+    gap: 8,
+    flexWrap: "wrap",
+    justifyContent: "flex-end",
+  },
+  modalOverlay: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,0.55)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 20,
+    zIndex: 999,
+  },
+  modal: {
+    width: "95vw",
+    height: "90vh",
+    background: "white",
+    borderRadius: 20,
+    overflow: "hidden",
+    display: "flex",
+    flexDirection: "column",
+    boxShadow: "0 20px 50px rgba(0,0,0,0.25)",
+  },
+  modalHeader: {
+    padding: 16,
+    borderBottom: "1px solid #e5e7eb",
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 14,
+    flexWrap: "wrap",
+  },
+  viewerControls: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+  },
+  viewerArea: {
+    flex: 1,
+    background: "#e5e7eb",
+    overflow: "auto",
+    position: "relative",
+  },
+  imageWrap: {
+    width: "100%",
+    height: "100%",
+    overflow: "auto",
+    display: "flex",
+    alignItems: "flex-start",
+    justifyContent: "center",
+    padding: 24,
+  },
+  viewerImage: {
+    maxWidth: "100%",
+    height: "auto",
+    transformOrigin: "top center",
+    transition: "transform 0.15s ease",
+    display: "block",
+  },
+  viewerIframe: {
+    width: "100%",
+    height: "100%",
+    border: "none",
+    background: "white",
+  },
+  unsupported: {
+    padding: 30,
+  },
+  zoomLabel: {
+    minWidth: 52,
+    textAlign: "center",
+    fontWeight: 700,
+  },
+  linkButton: {
+    border: "1px solid #d1d5db",
+    background: "white",
+    color: "#111827",
+    padding: "10px 14px",
+    borderRadius: 12,
+    textDecoration: "none",
+    fontWeight: 600,
+  },
 };
