@@ -22,8 +22,8 @@ function App() {
     if (!file) return;
 
     const fileExt = file.name.split(".").pop();
-    const fileName = `${Date.now()}.${fileExt}`;
-    const filePath = fileName;
+    const fileName = `${Date.now()}_${file.name}`;
+const filePath = `uploads/${fileName}`;
 
     // subir archivo
     const { error: uploadError } = await supabase.storage
