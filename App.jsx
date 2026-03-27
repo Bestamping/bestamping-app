@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "./supabase";
 
 const STATIONS = [
@@ -8,7 +8,7 @@ const STATIONS = [
   { id: "p4", name: "Plancha 4" },
 ];
 
-const appBg = "#091224";
+const APP_BG = "#091224";
 
 export default function App() {
   const params = new URLSearchParams(window.location.search);
@@ -192,7 +192,7 @@ function AdminScreen() {
     <div
       style={{
         minHeight: "100vh",
-        background: appBg,
+        background: APP_BG,
         color: "#fff",
         padding: 24,
         fontFamily: "Arial, sans-serif",
@@ -277,9 +277,7 @@ function AdminScreen() {
                 {loading ? "Subiendo..." : "Subir guía"}
               </button>
 
-              {message ? (
-                <div style={messageStyle}>{message}</div>
-              ) : null}
+              {message ? <div style={messageStyle}>{message}</div> : null}
             </div>
           </div>
 
@@ -358,7 +356,9 @@ function AdminScreen() {
                         </div>
                       ) : (
                         <>
-                          <div style={{ marginTop: 8, fontWeight: 700, fontSize: 18 }}>
+                          <div
+                            style={{ marginTop: 8, fontWeight: 700, fontSize: 18 }}
+                          >
                             {guide.title}
                           </div>
                           {guide.notes ? (
@@ -423,6 +423,11 @@ function StationScreen({ stationId }) {
   const [guide, setGuide] = useState(null);
   const [loading, setLoading] = useState(true);
   const [scale, setScale] = useState(1);
+  const pinchStateRef = useRef({
+    startDistance: 0,
+    startScale: 1,
+    pinching: false,
+  });
 
   const stationName =
     STATIONS.find((s) => s.id === stationId)?.name || stationId;
@@ -473,15 +478,47 @@ function StationScreen({ stationId }) {
   }
 
   function zoomIn() {
-    setScale((s) => Math.min(s + 0.25, 5));
+    setScale((prev) => Math.min(prev + 0.25, 4));
   }
 
   function zoomOut() {
-    setScale((s) => Math.max(s - 0.25, 1));
+    setScale((prev) => Math.max(prev - 0.25, 1));
   }
 
   function resetZoom() {
     setScale(1);
+  }
+
+  function getTouchDistance(touches) {
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  function handleTouchStart(e) {
+    if (e.touches.length === 2) {
+      pinchStateRef.current.startDistance = getTouchDistance(e.touches);
+      pinchStateRef.current.startScale = scale;
+      pinchStateRef.current.pinching = true;
+    }
+  }
+
+  function handleTouchMove(e) {
+    if (e.touches.length === 2 && pinchStateRef.current.pinching) {
+      const newDistance = getTouchDistance(e.touches);
+      const ratio = newDistance / pinchStateRef.current.startDistance;
+      const nextScale = Math.min(
+        Math.max(pinchStateRef.current.startScale * ratio, 1),
+        5
+      );
+      setScale(nextScale);
+    }
+  }
+
+  function handleTouchEnd(e) {
+    if (e.touches.length < 2) {
+      pinchStateRef.current.pinching = false;
+    }
   }
 
   if (loading) {
@@ -519,6 +556,7 @@ function StationScreen({ stationId }) {
           <div style={{ fontSize: 14, opacity: 0.8 }}>{stationName}</div>
           <div style={{ fontSize: 24, fontWeight: 700 }}>{guide.title}</div>
         </div>
+
         {guide.notes ? (
           <div
             style={{
@@ -542,7 +580,12 @@ function StationScreen({ stationId }) {
         }}
       >
         {guide.type === "image" ? (
-          <div style={imageViewer}>
+          <div
+            style={imageViewer}
+            onTouchStart={handleTouchStart}
+            onTouchMove={handleTouchMove}
+            onTouchEnd={handleTouchEnd}
+          >
             <div style={controlsStyle}>
               <button onClick={zoomOut} style={zoomBtnStyle}>➖</button>
               <button onClick={zoomIn} style={zoomBtnStyle}>➕</button>
@@ -551,10 +594,13 @@ function StationScreen({ stationId }) {
 
             <div
               style={{
-                transform: `scale(${scale})`,
-                transformOrigin: "top center",
-                width: "fit-content",
-                margin: "0 auto",
+                width: "100%",
+                minHeight: "100%",
+                display: "flex",
+                justifyContent: "center",
+                alignItems: "flex-start",
+                padding: 20,
+                boxSizing: "border-box",
               }}
             >
               <img
@@ -562,8 +608,14 @@ function StationScreen({ stationId }) {
                 alt={guide.title}
                 style={{
                   display: "block",
+                  width: `${scale * 100}%`,
                   maxWidth: "none",
                   height: "auto",
+                  borderRadius: 10,
+                  touchAction: "none",
+                  userSelect: "none",
+                  WebkitUserSelect: "none",
+                  WebkitTouchCallout: "none",
                 }}
               />
             </div>
