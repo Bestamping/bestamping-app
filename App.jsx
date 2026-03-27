@@ -578,27 +578,74 @@ function StationScreen({ stationId }) {
         }}
       >
         {guide.type === "image" ? (
-          <img
-            src={guide.file_url}
-            alt={guide.title}
+          <div
             style={{
               width: "100%",
               height: "calc(100vh - 90px)",
-              objectFit: "contain",
-              display: "block",
+              overflow: "auto",
+              WebkitOverflowScrolling: "touch",
+              background: "#000",
+              textAlign: "center",
             }}
-          />
+          >
+            <img
+              src={guide.file_url}
+              alt={guide.title}
+              style={{
+                maxWidth: "none",
+                width: "auto",
+                height: "auto",
+                minWidth: "100%",
+                display: "inline-block",
+              }}
+            />
+          </div>
         ) : (
-          <iframe
-            src={guide.file_url}
-            title={guide.title}
+          <div
             style={{
               width: "100%",
               height: "calc(100vh - 90px)",
-              border: "none",
               background: "#fff",
+              position: "relative",
             }}
-          />
+          >
+            <div
+              style={{
+                position: "absolute",
+                top: 12,
+                right: 12,
+                zIndex: 20,
+              }}
+            >
+              <a
+                href={guide.file_url}
+                target="_blank"
+                rel="noreferrer"
+                style={{
+                  display: "inline-block",
+                  padding: "10px 14px",
+                  borderRadius: 10,
+                  background: "#c7d2fe",
+                  color: "#111827",
+                  fontWeight: 700,
+                  textDecoration: "none",
+                }}
+              >
+                Abrir PDF
+              </a>
+            </div>
+
+            <iframe
+              src={guide.file_url}
+              title={guide.title}
+              style={{
+                width: "100%",
+                height: "100%",
+                border: "none",
+                background: "#fff",
+              }}
+            />
+          </div>
         )}
       </div>
     </div>
