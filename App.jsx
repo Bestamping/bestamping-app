@@ -457,6 +457,7 @@ function AdminScreen() {
 function StationScreen({ stationId }) {
   const [guide, setGuide] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [scale, setScale] = useState(1);
 
   const stationName =
     STATIONS.find((s) => s.id === stationId)?.name || stationId;
@@ -502,138 +503,102 @@ function StationScreen({ stationId }) {
     }
 
     setGuide(data || null);
+    setScale(1);
     setLoading(false);
+  }
+
+  function zoomIn() {
+    setScale((s) => Math.min(s + 0.3, 5));
+  }
+
+  function zoomOut() {
+    setScale((s) => Math.max(s - 0.3, 1));
+  }
+
+  function resetZoom() {
+    setScale(1);
   }
 
   if (loading) {
     return (
-      <FullscreenWrap>
+      <div style={fullscreenStyle}>
         <div style={{ fontSize: 28 }}>Cargando...</div>
-      </FullscreenWrap>
+      </div>
     );
   }
 
   if (!guide) {
     return (
-      <FullscreenWrap>
+      <div style={fullscreenStyle}>
         <div style={{ textAlign: "center" }}>
           <div style={{ fontSize: 26, opacity: 0.8 }}>{stationName}</div>
           <div style={{ fontSize: 42, fontWeight: 700, marginTop: 12 }}>
             Sin guía asignada
           </div>
         </div>
-      </FullscreenWrap>
+      </div>
     );
   }
 
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background: "#000",
-        color: "#fff",
-        fontFamily: "Arial, sans-serif",
-      }}
-    >
-      <div
-        style={{
-          position: "fixed",
-          top: 12,
-          left: 12,
-          right: 12,
-          zIndex: 10,
-          display: "flex",
-          justifyContent: "space-between",
-          gap: 16,
-          padding: 14,
-          borderRadius: 14,
-          background: "rgba(0,0,0,0.55)",
-          backdropFilter: "blur(8px)",
-        }}
-      >
+    <div style={containerStyle}>
+      {/* HEADER */}
+      <div style={headerStyle}>
         <div>
-          <div style={{ fontSize: 14, opacity: 0.8 }}>{stationName}</div>
-          <div style={{ fontSize: 24, fontWeight: 700 }}>{guide.title}</div>
+          <div style={{ fontSize: 14, opacity: 0.7 }}>{stationName}</div>
+          <div style={{ fontSize: 24, fontWeight: 700 }}>
+            {guide.title}
+          </div>
         </div>
-        {guide.notes ? (
-          <div
-            style={{
-              maxWidth: "45%",
-              textAlign: "right",
-              fontSize: 15,
-              opacity: 0.9,
-            }}
-          >
+
+        {guide.notes && (
+          <div style={{ maxWidth: "45%", textAlign: "right" }}>
             {guide.notes}
           </div>
-        ) : null}
+        )}
       </div>
 
-      <div
-        style={{
-          paddingTop: 90,
-          width: "100%",
-          height: "100vh",
-          boxSizing: "border-box",
-        }}
-      >
+      {/* CONTENIDO */}
+      <div style={{ paddingTop: 90 }}>
         {guide.type === "image" ? (
-          <div
-            style={{
-              width: "100%",
-              height: "calc(100vh - 90px)",
-              overflow: "auto",
-              WebkitOverflowScrolling: "touch",
-              background: "#000",
-              textAlign: "center",
-            }}
-          >
-            <img
-              src={guide.file_url}
-              alt={guide.title}
-              style={{
-                maxWidth: "none",
-                width: "auto",
-                height: "auto",
-                minWidth: "100%",
-                display: "inline-block",
-              }}
-            />
-          </div>
-        ) : (
-          <div
-            style={{
-              width: "100%",
-              height: "calc(100vh - 90px)",
-              background: "#fff",
-              position: "relative",
-            }}
-          >
+          <div style={imageWrapperStyle}>
+            {/* CONTROLES */}
+            <div style={controlsStyle}>
+              <button onClick={zoomOut} style={btnStyle}>➖</button>
+              <button onClick={zoomIn} style={btnStyle}>➕</button>
+              <button onClick={resetZoom} style={btnStyle}>🔄</button>
+            </div>
+
+            {/* IMAGEN */}
             <div
               style={{
-                position: "absolute",
-                top: 12,
-                right: 12,
-                zIndex: 20,
+                transform: `scale(${scale})`,
+                transformOrigin: "top center",
+                width: "fit-content",
+                margin: "0 auto",
               }}
             >
-              <a
-                href={guide.file_url}
-                target="_blank"
-                rel="noreferrer"
+              <img
+                src={guide.file_url}
+                alt={guide.title}
                 style={{
-                  display: "inline-block",
-                  padding: "10px 14px",
-                  borderRadius: 10,
-                  background: "#c7d2fe",
-                  color: "#111827",
-                  fontWeight: 700,
-                  textDecoration: "none",
+                  display: "block",
+                  maxWidth: "none",
                 }}
-              >
-                Abrir PDF
-              </a>
+              />
             </div>
+          </div>
+        ) : (
+          <div style={pdfWrapperStyle}>
+            {/* BOTÓN PDF */}
+            <a
+              href={guide.file_url}
+              target="_blank"
+              rel="noreferrer"
+              style={pdfButtonStyle}
+            >
+              📄 Abrir PDF
+            </a>
 
             <iframe
               src={guide.file_url}
@@ -642,7 +607,6 @@ function StationScreen({ stationId }) {
                 width: "100%",
                 height: "100%",
                 border: "none",
-                background: "#fff",
               }}
             />
           </div>
@@ -652,73 +616,81 @@ function StationScreen({ stationId }) {
   );
 }
 
-function FullscreenWrap({ children }) {
-  return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background: "#000",
-        color: "#fff",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        fontFamily: "Arial, sans-serif",
-        padding: 24,
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
-const labelStyle = {
-  display: "block",
-  marginBottom: 6,
-  fontWeight: 700,
-  fontSize: 14,
-};
-
-const inputStyle = {
-  width: "100%",
-  padding: "10px 12px",
-  borderRadius: 10,
-  border: "1px solid rgba(255,255,255,0.12)",
-  background: "rgba(255,255,255,0.06)",
+const containerStyle = {
+  minHeight: "100vh",
+  background: "#000",
   color: "#fff",
-  fontSize: 14,
-  boxSizing: "border-box",
+  fontFamily: "Arial",
 };
 
-const buttonStyle = {
-  border: "none",
-  borderRadius: 12,
+const fullscreenStyle = {
+  minHeight: "100vh",
+  background: "#000",
+  color: "#fff",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+};
+
+const headerStyle = {
+  position: "fixed",
+  top: 12,
+  left: 12,
+  right: 12,
+  zIndex: 10,
+  display: "flex",
+  justifyContent: "space-between",
+  padding: 14,
+  borderRadius: 14,
+  background: "rgba(0,0,0,0.6)",
+  backdropFilter: "blur(8px)",
+};
+
+const imageWrapperStyle = {
+  width: "100%",
+  height: "calc(100vh - 90px)",
+  overflow: "auto",
+  WebkitOverflowScrolling: "touch",
+  background: "#000",
+};
+
+const controlsStyle = {
+  position: "fixed",
+  bottom: 20,
+  left: "50%",
+  transform: "translateX(-50%)",
+  display: "flex",
+  gap: 10,
+  zIndex: 20,
+};
+
+const btnStyle = {
   padding: "12px 16px",
+  borderRadius: 12,
+  border: "none",
+  background: "#fff",
+  fontSize: 18,
+  fontWeight: 700,
+};
+
+const pdfWrapperStyle = {
+  width: "100%",
+  height: "calc(100vh - 90px)",
+  background: "#fff",
+  position: "relative",
+};
+
+const pdfButtonStyle = {
+  position: "absolute",
+  top: 12,
+  right: 12,
+  zIndex: 20,
+  padding: "10px 14px",
+  borderRadius: 10,
   background: "#c7d2fe",
-  color: "#111827",
+  color: "#111",
   fontWeight: 700,
-  fontSize: 15,
-};
-
-const smallButtonStyle = {
-  border: "none",
-  borderRadius: 10,
-  padding: "8px 12px",
-  background: "#dbe4ff",
-  color: "#111827",
-  fontWeight: 700,
-  fontSize: 13,
-  cursor: "pointer",
-};
-
-const dangerButtonStyle = {
-  border: "none",
-  borderRadius: 10,
-  padding: "8px 12px",
-  background: "#fecaca",
-  color: "#7f1d1d",
-  fontWeight: 700,
-  fontSize: 13,
-  cursor: "pointer",
+  textDecoration: "none",
 };
 
 export default App;
