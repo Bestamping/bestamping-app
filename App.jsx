@@ -10,6 +10,7 @@ const STATIONS = [
 const STATUS_LABELS = {
   pending: "En cola",
   in_progress: "En proceso",
+  paused: "Pausado",
   done: "Finalizado",
 };
 
@@ -18,6 +19,61 @@ function getStationFromUrl() {
   const station = params.get("station");
   if (STATIONS.some((s) => s.id === station)) return station;
   return null;
+}
+
+function stationName(id) {
+  return STATIONS.find((s) => s.id === id)?.name || id;
+}
+
+function isImage(job) {
+  return job?.file_type?.startsWith("image/");
+}
+
+function isPdf(job) {
+  return (
+    job?.file_type === "application/pdf" ||
+    job?.file_name?.toLowerCase().endsWith(".pdf")
+  );
+}
+
+function formatSeconds(total) {
+  const s = Math.max(0, total || 0);
+  const hours = Math.floor(s / 3600);
+  const minutes = Math.floor((s % 3600) / 60);
+  const seconds = s % 60;
+
+  return [hours, minutes, seconds]
+    .map((n) => String(n).padStart(2, "0"))
+    .join(":");
+}
+
+function formatDateTime(value) {
+  if (!value) return "—";
+  const d = new Date(value);
+  return d.toLocaleString();
+}
+
+function getLiveElapsedSeconds(job, nowTs) {
+  let total = job?.total_elapsed_seconds || 0;
+
+  if (job?.status === "in_progress" && job?.started_at) {
+    const started = new Date(job.started_at).getTime();
+    const delta = Math.max(0, Math.floor((nowTs - started) / 1000));
+    total += delta;
+  }
+
+  return total;
+}
+
+function buildIOSMessageLink(job, currentDurationText) {
+  const message = [
+    `Trabajo: ${job.title}`,
+    `Plancha: ${stationName(job.station)}`,
+    `Estado: ${STATUS_LABELS[job.status] || job.status}`,
+    `Duración: ${currentDurationText}`,
+  ].join("\n");
+
+  return `sms:+34690396413&body=${encodeURIComponent(message)}`;
 }
 
 export default function App() {
@@ -41,6 +97,17 @@ export default function App() {
   const [activeJob, setActiveJob] = useState(null);
   const [imageZoom, setImageZoom] = useState(1);
 
+  const [adminTab, setAdminTab] = useState("queue"); // queue | history
+  const [nowTs, setNowTs] = useState(Date.now());
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setNowTs(Date.now());
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, []);
+
   useEffect(() => {
     fetchJobs();
 
@@ -58,7 +125,20 @@ export default function App() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [selectedStation, lockedToStation]);
+
+  const activeJobs = useMemo(
+    () => jobs.filter((j) => j.status !== "done"),
+    [jobs]
+  );
+
+  const historyJobs = useMemo(
+    () =>
+      jobs
+        .filter((j) => j.status === "done")
+        .sort((a, b) => new Date(b.completed_at || 0) - new Date(a.completed_at || 0)),
+    [jobs]
+  );
 
   const jobsByStation = useMemo(() => {
     const grouped = {
@@ -67,7 +147,7 @@ export default function App() {
       plancha3: [],
     };
 
-    const sorted = [...jobs].sort((a, b) => {
+    const sorted = [...activeJobs].sort((a, b) => {
       const aOrder = a.sort_order ?? 0;
       const bOrder = b.sort_order ?? 0;
       if (aOrder !== bOrder) return aOrder - bOrder;
@@ -79,7 +159,7 @@ export default function App() {
     }
 
     return grouped;
-  }, [jobs]);
+  }, [activeJobs]);
 
   const stationJobs = jobsByStation[selectedStation] || [];
 
@@ -89,11 +169,12 @@ export default function App() {
     let query = supabase
       .from("production_jobs")
       .select("*")
-      .order("sort_order", { ascending: true })
       .order("created_at", { ascending: true });
 
     if (lockedToStation) {
-      query = query.eq("station", selectedStation);
+      query = query
+        .eq("station", selectedStation)
+        .neq("status", "done");
     }
 
     const { data, error } = await query;
@@ -108,7 +189,9 @@ export default function App() {
   }
 
   async function getNextSortOrder(stationId) {
-    const stationList = jobs.filter((j) => j.station === stationId);
+    const stationList = jobs.filter(
+      (j) => j.station === stationId && j.status !== "done"
+    );
     if (!stationList.length) return 1;
     return Math.max(...stationList.map((j) => j.sort_order || 0)) + 1;
   }
@@ -155,6 +238,7 @@ export default function App() {
           file_type: file.type || `application/${ext}`,
           status: "pending",
           sort_order: nextSortOrder,
+          total_elapsed_seconds: 0,
         });
 
       if (insertError) throw insertError;
@@ -185,50 +269,145 @@ export default function App() {
   async function startJob(job) {
     const { error } = await supabase
       .from("production_jobs")
-      .update({ status: "in_progress" })
+      .update({
+        status: "in_progress",
+        started_at: new Date().toISOString(),
+        paused_at: null,
+      })
       .eq("id", job.id);
 
     if (error) {
       console.error(error);
-      alert("No se pudo marcar como en proceso.");
+      alert("No se pudo iniciar el trabajo.");
       return;
     }
 
-    setActiveJob(job);
+    setActiveJob((prev) => (prev?.id === job.id ? { ...prev, status: "in_progress" } : prev));
+    await fetchJobs();
+  }
+
+  async function pauseJob(job) {
+    if (!job.started_at) {
+      alert("Este trabajo no tiene inicio registrado.");
+      return;
+    }
+
+    const startedMs = new Date(job.started_at).getTime();
+    const elapsedThisRun = Math.max(
+      0,
+      Math.floor((Date.now() - startedMs) / 1000)
+    );
+
+    const { error } = await supabase
+      .from("production_jobs")
+      .update({
+        status: "paused",
+        paused_at: new Date().toISOString(),
+        started_at: null,
+        total_elapsed_seconds: (job.total_elapsed_seconds || 0) + elapsedThisRun,
+      })
+      .eq("id", job.id);
+
+    if (error) {
+      console.error(error);
+      alert("No se pudo pausar el trabajo.");
+      return;
+    }
+
+    await fetchJobs();
+  }
+
+  async function resumeJob(job) {
+    const { error } = await supabase
+      .from("production_jobs")
+      .update({
+        status: "in_progress",
+        started_at: new Date().toISOString(),
+        paused_at: null,
+      })
+      .eq("id", job.id);
+
+    if (error) {
+      console.error(error);
+      alert("No se pudo reanudar el trabajo.");
+      return;
+    }
+
     await fetchJobs();
   }
 
   async function finalizeJob(job) {
-    const ok = window.confirm(
-      `¿Finalizar y borrar "${job.title}" de la cola?`
-    );
+    const ok = window.confirm(`¿Finalizar "${job.title}"?`);
     if (!ok) return;
 
     try {
-      const { error: storageError } = await supabase.storage
-        .from("job-files")
-        .remove([job.file_path]);
+      let finalSeconds = job.total_elapsed_seconds || 0;
 
-      if (storageError) {
-        console.warn("No se pudo borrar el archivo del storage:", storageError);
+      if (job.status === "in_progress" && job.started_at) {
+        const startedMs = new Date(job.started_at).getTime();
+        finalSeconds += Math.max(0, Math.floor((Date.now() - startedMs) / 1000));
       }
 
-      const { error: deleteError } = await supabase
+      const messageText = [
+        `Trabajo: ${job.title}`,
+        `Plancha: ${stationName(job.station)}`,
+        `Finalizado: ${new Date().toLocaleString()}`,
+        `Duración total: ${formatSeconds(finalSeconds)}`,
+      ].join("\n");
+
+      const { error } = await supabase
         .from("production_jobs")
-        .delete()
+        .update({
+          status: "done",
+          completed_at: new Date().toISOString(),
+          started_at: null,
+          paused_at: null,
+          total_elapsed_seconds: finalSeconds,
+          message_text: messageText,
+          sort_order: 0,
+        })
         .eq("id", job.id);
 
-      if (deleteError) throw deleteError;
+      if (error) throw error;
 
       if (activeJob?.id === job.id) {
         setActiveJob(null);
         setImageZoom(1);
       }
 
+      await normalizeQueue(job.station, job.id);
       await fetchJobs();
     } catch (error) {
       console.error(error);
       alert("No se pudo finalizar el trabajo.");
+    }
+  }
+
+  async function requeueJob(job) {
+    const ok = window.confirm(`¿Volver a poner en cola "${job.title}"?`);
+    if (!ok) return;
+
+    try {
+      const nextSortOrder = await getNextSortOrder(job.station);
+
+      const { error } = await supabase
+        .from("production_jobs")
+        .update({
+          status: "pending",
+          started_at: null,
+          paused_at: null,
+          completed_at: null,
+          total_elapsed_seconds: 0,
+          sort_order: nextSortOrder,
+        })
+        .eq("id", job.id);
+
+      if (error) throw error;
+
+      await fetchJobs();
+    } catch (error) {
+      console.error(error);
+      alert("No se pudo volver a poner en cola.");
     }
   }
 
@@ -269,6 +448,32 @@ export default function App() {
     }
   }
 
+  async function normalizeQueue(stationId, removedId = null) {
+    const list = [...jobs]
+      .filter(
+        (j) =>
+          j.station === stationId &&
+          j.status !== "done" &&
+          j.id !== removedId
+      )
+      .sort((a, b) => {
+        const aOrder = a.sort_order ?? 0;
+        const bOrder = b.sort_order ?? 0;
+        if (aOrder !== bOrder) return aOrder - bOrder;
+        return new Date(a.created_at) - new Date(b.created_at);
+      });
+
+    for (let i = 0; i < list.length; i++) {
+      const desiredOrder = i + 1;
+      if (list[i].sort_order !== desiredOrder) {
+        await supabase
+          .from("production_jobs")
+          .update({ sort_order: desiredOrder })
+          .eq("id", list[i].id);
+      }
+    }
+  }
+
   function openJob(job) {
     setActiveJob(job);
     setImageZoom(1);
@@ -277,17 +482,6 @@ export default function App() {
   function closeViewer() {
     setActiveJob(null);
     setImageZoom(1);
-  }
-
-  function isImage(job) {
-    return job?.file_type?.startsWith("image/");
-  }
-
-  function isPdf(job) {
-    return (
-      job?.file_type === "application/pdf" ||
-      job?.file_name?.toLowerCase().endsWith(".pdf")
-    );
   }
 
   const activeJobUrl = activeJob ? getPublicUrl(activeJob.file_path) : "";
@@ -392,48 +586,153 @@ export default function App() {
             </section>
 
             <section style={styles.card}>
-              <h2 style={styles.sectionTitle}>URLs de cada plancha</h2>
-
-              <div style={{ display: "grid", gap: 12 }}>
-                {STATIONS.map((s) => {
-                  const url = `${window.location.origin}${window.location.pathname}?station=${s.id}`;
-                  return (
-                    <div key={s.id} style={styles.urlBox}>
-                      <div style={{ fontWeight: 700, marginBottom: 6 }}>
-                        {s.name}
-                      </div>
-                      <div style={styles.urlText}>{url}</div>
-                    </div>
-                  );
-                })}
+              <div style={styles.adminTabs}>
+                <button
+                  style={{
+                    ...styles.tabButton,
+                    ...(adminTab === "queue" ? styles.tabButtonActive : {}),
+                  }}
+                  onClick={() => setAdminTab("queue")}
+                >
+                  Cola activa
+                </button>
+                <button
+                  style={{
+                    ...styles.tabButton,
+                    ...(adminTab === "history" ? styles.tabButtonActive : {}),
+                  }}
+                  onClick={() => setAdminTab("history")}
+                >
+                  Historial
+                </button>
               </div>
 
-              <div style={{ marginTop: 20 }}>
-                {loadingJobs ? (
-                  <p>Cargando trabajos...</p>
-                ) : jobs.length === 0 ? (
-                  <p>No hay trabajos en cola.</p>
-                ) : (
-                  <div style={styles.managerJobList}>
-                    {jobs.map((job) => (
-                      <div key={job.id} style={styles.jobRow}>
-                        <div>
-                          <div style={styles.jobTitle}>{job.title}</div>
-                          <div style={styles.jobMeta}>
-                            {stationName(job.station)} · {STATUS_LABELS[job.status]}
+              {adminTab === "queue" ? (
+                <>
+                  <h2 style={styles.sectionTitle}>URLs de cada plancha</h2>
+
+                  <div style={{ display: "grid", gap: 12 }}>
+                    {STATIONS.map((s) => {
+                      const url = `${window.location.origin}${window.location.pathname}?station=${s.id}`;
+                      return (
+                        <div key={s.id} style={styles.urlBox}>
+                          <div style={{ fontWeight: 700, marginBottom: 6 }}>
+                            {s.name}
                           </div>
+                          <div style={styles.urlText}>{url}</div>
                         </div>
-                        <button
-                          style={styles.secondaryButton}
-                          onClick={() => openJob(job)}
-                        >
-                          Ver
-                        </button>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
-                )}
-              </div>
+
+                  <div style={{ marginTop: 20 }}>
+                    {loadingJobs ? (
+                      <p>Cargando trabajos...</p>
+                    ) : activeJobs.length === 0 ? (
+                      <p>No hay trabajos activos.</p>
+                    ) : (
+                      <div style={styles.managerJobList}>
+                        {activeJobs.map((job) => {
+                          const liveSeconds = getLiveElapsedSeconds(job, nowTs);
+                          return (
+                            <div key={job.id} style={styles.jobRow}>
+                              <div>
+                                <div style={styles.jobTitle}>{job.title}</div>
+                                <div style={styles.jobMeta}>
+                                  {stationName(job.station)} ·{" "}
+                                  {STATUS_LABELS[job.status]}
+                                </div>
+                                <div style={styles.jobMeta}>
+                                  Tiempo: {formatSeconds(liveSeconds)}
+                                </div>
+                              </div>
+                              <button
+                                style={styles.secondaryButton}
+                                onClick={() => openJob(job)}
+                              >
+                                Ver
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <h2 style={styles.sectionTitle}>Historial</h2>
+
+                  {loadingJobs ? (
+                    <p>Cargando historial...</p>
+                  ) : historyJobs.length === 0 ? (
+                    <p>No hay trabajos finalizados.</p>
+                  ) : (
+                    <div style={styles.historyList}>
+                      {historyJobs.map((job) => (
+                        <div key={job.id} style={styles.historyCard}>
+                          <div style={styles.historyTop}>
+                            <div>
+                              <div style={styles.jobTitle}>{job.title}</div>
+                              <div style={styles.jobMeta}>
+                                {stationName(job.station)} · Finalizado
+                              </div>
+                            </div>
+
+                            <div style={styles.historyActions}>
+                              <button
+                                style={styles.secondaryButton}
+                                onClick={() => openJob(job)}
+                              >
+                                Ver
+                              </button>
+                              <button
+                                style={styles.primaryButton}
+                                onClick={() => requeueJob(job)}
+                              >
+                                Volver a cola
+                              </button>
+                            </div>
+                          </div>
+
+                          <div style={styles.historyGrid}>
+                            <div>
+                              <strong>Creado</strong>
+                              <div>{formatDateTime(job.created_at)}</div>
+                            </div>
+                            <div>
+                              <strong>Inicio</strong>
+                              <div>{formatDateTime(job.started_at)}</div>
+                            </div>
+                            <div>
+                              <strong>Finalizado</strong>
+                              <div>{formatDateTime(job.completed_at)}</div>
+                            </div>
+                            <div>
+                              <strong>Duración</strong>
+                              <div>{formatSeconds(job.total_elapsed_seconds)}</div>
+                            </div>
+                          </div>
+
+                          {job.notes ? (
+                            <div style={styles.historyMessageBlock}>
+                              <strong>Notas</strong>
+                              <div style={styles.preWrap}>{job.notes}</div>
+                            </div>
+                          ) : null}
+
+                          {job.message_text ? (
+                            <div style={styles.historyMessageBlock}>
+                              <strong>Mensaje</strong>
+                              <div style={styles.preWrap}>{job.message_text}</div>
+                            </div>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
             </section>
           </div>
         ) : (
@@ -485,60 +784,106 @@ export default function App() {
                 ) : stationJobs.length === 0 ? (
                   <p>No hay trabajos para esta plancha.</p>
                 ) : (
-                  stationJobs.map((job, index) => (
-                    <div key={job.id} style={styles.queueItem}>
-                      <div style={styles.queueNumber}>{index + 1}</div>
+                  stationJobs.map((job, index) => {
+                    const liveSeconds = getLiveElapsedSeconds(job, nowTs);
+                    const smsLink = buildIOSMessageLink(
+                      job,
+                      formatSeconds(liveSeconds)
+                    );
 
-                      <div style={{ flex: 1 }}>
-                        <div style={styles.jobTitle}>{job.title}</div>
-                        <div style={styles.jobMeta}>
-                          {STATUS_LABELS[job.status]} · {job.file_name}
+                    return (
+                      <div key={job.id} style={styles.queueItem}>
+                        <div style={styles.queueNumber}>{index + 1}</div>
+
+                        <div style={{ flex: 1 }}>
+                          <div style={styles.jobTitle}>{job.title}</div>
+                          <div style={styles.jobMeta}>
+                            {STATUS_LABELS[job.status]} · {job.file_name}
+                          </div>
+                          <div style={styles.jobMeta}>
+                            Tiempo: {formatSeconds(liveSeconds)}
+                          </div>
+                          {job.notes ? (
+                            <div style={styles.jobNotes}>{job.notes}</div>
+                          ) : null}
                         </div>
-                        {job.notes ? (
-                          <div style={styles.jobNotes}>{job.notes}</div>
-                        ) : null}
-                      </div>
 
-                      <div style={styles.queueActions}>
-                        <button
-                          style={styles.smallButton}
-                          onClick={() => moveJob(job, "up")}
-                          disabled={index === 0}
-                        >
-                          ↑
-                        </button>
-                        <button
-                          style={styles.smallButton}
-                          onClick={() => moveJob(job, "down")}
-                          disabled={index === stationJobs.length - 1}
-                        >
-                          ↓
-                        </button>
-                        <button
-                          style={styles.secondaryButton}
-                          onClick={() => openJob(job)}
-                        >
-                          Abrir
-                        </button>
-                        {job.status === "pending" && (
+                        <div style={styles.queueActions}>
                           <button
-                            style={styles.primaryButton}
-                            onClick={() => startJob(job)}
+                            style={styles.smallButton}
+                            onClick={() => moveJob(job, "up")}
+                            disabled={index === 0}
                           >
-                            Empezar
+                            ↑
                           </button>
-                        )}
-                        {job.status === "in_progress" && (
                           <button
-                            style={styles.dangerButton}
-                            onClick={() => finalizeJob(job)}
+                            style={styles.smallButton}
+                            onClick={() => moveJob(job, "down")}
+                            disabled={index === stationJobs.length - 1}
                           >
-                            Finalizar
+                            ↓
                           </button>
-                        )}
+
+                          <button
+                            style={styles.secondaryButton}
+                            onClick={() => openJob(job)}
+                          >
+                            Abrir
+                          </button>
+
+                          <a
+                            href={smsLink}
+                            style={styles.linkButton}
+                          >
+                            Mensajes
+                          </a>
+
+                          {job.status === "pending" && (
+                            <button
+                              style={styles.primaryButton}
+                              onClick={() => startJob(job)}
+                            >
+                              Empezar
+                            </button>
+                          )}
+
+                          {job.status === "in_progress" && (
+                            <>
+                              <button
+                                style={styles.pauseButton}
+                                onClick={() => pauseJob(job)}
+                              >
+                                Pausar
+                              </button>
+                              <button
+                                style={styles.dangerButton}
+                                onClick={() => finalizeJob(job)}
+                              >
+                                Finalizar
+                              </button>
+                            </>
+                          )}
+
+                          {job.status === "paused" && (
+                            <>
+                              <button
+                                style={styles.primaryButton}
+                                onClick={() => resumeJob(job)}
+                              >
+                                Reanudar
+                              </button>
+                              <button
+                                style={styles.dangerButton}
+                                onClick={() => finalizeJob(job)}
+                              >
+                                Finalizar
+                              </button>
+                            </>
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  ))
+                    );
+                  })
                 )}
               </div>
             </section>
@@ -558,6 +903,10 @@ export default function App() {
               </div>
 
               <div style={styles.viewerControls}>
+                <div style={styles.timerBadge}>
+                  {formatSeconds(getLiveElapsedSeconds(activeJob, nowTs))}
+                </div>
+
                 {isImage(activeJob) && (
                   <>
                     <button
@@ -568,7 +917,9 @@ export default function App() {
                     >
                       -
                     </button>
-                    <span style={styles.zoomLabel}>{Math.round(imageZoom * 100)}%</span>
+                    <span style={styles.zoomLabel}>
+                      {Math.round(imageZoom * 100)}%
+                    </span>
                     <button
                       style={styles.smallButton}
                       onClick={() =>
@@ -591,6 +942,16 @@ export default function App() {
                   </a>
                 )}
 
+                <a
+                  href={buildIOSMessageLink(
+                    activeJob,
+                    formatSeconds(getLiveElapsedSeconds(activeJob, nowTs))
+                  )}
+                  style={styles.linkButton}
+                >
+                  Mensajes
+                </a>
+
                 {activeJob.status === "pending" && mode === "operator" && (
                   <button
                     style={styles.primaryButton}
@@ -601,12 +962,37 @@ export default function App() {
                 )}
 
                 {activeJob.status === "in_progress" && mode === "operator" && (
-                  <button
-                    style={styles.dangerButton}
-                    onClick={() => finalizeJob(activeJob)}
-                  >
-                    Finalizar
-                  </button>
+                  <>
+                    <button
+                      style={styles.pauseButton}
+                      onClick={() => pauseJob(activeJob)}
+                    >
+                      Pausar
+                    </button>
+                    <button
+                      style={styles.dangerButton}
+                      onClick={() => finalizeJob(activeJob)}
+                    >
+                      Finalizar
+                    </button>
+                  </>
+                )}
+
+                {activeJob.status === "paused" && mode === "operator" && (
+                  <>
+                    <button
+                      style={styles.primaryButton}
+                      onClick={() => resumeJob(activeJob)}
+                    >
+                      Reanudar
+                    </button>
+                    <button
+                      style={styles.dangerButton}
+                      onClick={() => finalizeJob(activeJob)}
+                    >
+                      Finalizar
+                    </button>
+                  </>
                 )}
 
                 <button style={styles.secondaryButton} onClick={closeViewer}>
@@ -644,10 +1030,6 @@ export default function App() {
       )}
     </div>
   );
-}
-
-function stationName(id) {
-  return STATIONS.find((s) => s.id === id)?.name || id;
 }
 
 const styles = {
@@ -725,6 +1107,25 @@ const styles = {
     marginBottom: 16,
     fontSize: 22,
   },
+  adminTabs: {
+    display: "flex",
+    gap: 10,
+    marginBottom: 20,
+  },
+  tabButton: {
+    border: "1px solid #d1d5db",
+    background: "white",
+    color: "#111827",
+    padding: "10px 14px",
+    borderRadius: 12,
+    cursor: "pointer",
+    fontWeight: 700,
+  },
+  tabButtonActive: {
+    background: "#2563eb",
+    color: "white",
+    borderColor: "#2563eb",
+  },
   form: {
     display: "flex",
     flexDirection: "column",
@@ -762,6 +1163,10 @@ const styles = {
     borderRadius: 12,
     cursor: "pointer",
     fontWeight: 700,
+    textDecoration: "none",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
   },
   secondaryButton: {
     border: "1px solid #d1d5db",
@@ -771,6 +1176,19 @@ const styles = {
     borderRadius: 12,
     cursor: "pointer",
     fontWeight: 600,
+    textDecoration: "none",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  pauseButton: {
+    border: "none",
+    background: "#f59e0b",
+    color: "white",
+    padding: "10px 14px",
+    borderRadius: 12,
+    cursor: "pointer",
+    fontWeight: 700,
   },
   dangerButton: {
     border: "none",
@@ -796,6 +1214,47 @@ const styles = {
     flexDirection: "column",
     gap: 12,
     marginTop: 20,
+  },
+  historyList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 16,
+  },
+  historyCard: {
+    border: "1px solid #e5e7eb",
+    borderRadius: 16,
+    padding: 16,
+    background: "#fafafa",
+  },
+  historyTop: {
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 16,
+    flexWrap: "wrap",
+    alignItems: "center",
+  },
+  historyActions: {
+    display: "flex",
+    gap: 10,
+    flexWrap: "wrap",
+  },
+  historyGrid: {
+    marginTop: 14,
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+    gap: 12,
+  },
+  historyMessageBlock: {
+    marginTop: 14,
+    padding: 12,
+    border: "1px solid #e5e7eb",
+    borderRadius: 12,
+    background: "white",
+  },
+  preWrap: {
+    whiteSpace: "pre-wrap",
+    marginTop: 6,
+    color: "#374151",
   },
   jobRow: {
     display: "flex",
@@ -973,6 +1432,9 @@ const styles = {
     borderRadius: 12,
     textDecoration: "none",
     fontWeight: 600,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
   },
   urlBox: {
     border: "1px solid #e5e7eb",
@@ -984,5 +1446,14 @@ const styles = {
     fontSize: 13,
     color: "#374151",
     wordBreak: "break-all",
+  },
+  timerBadge: {
+    background: "#111827",
+    color: "white",
+    padding: "10px 12px",
+    borderRadius: 12,
+    fontWeight: 700,
+    minWidth: 94,
+    textAlign: "center",
   },
 };
