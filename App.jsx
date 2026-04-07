@@ -898,10 +898,11 @@ export default function App() {
                 </p>
               </div>
 
-              <div style={styles.viewerControls}>
-                <div style={styles.timerBadge}>
-                  {formatSeconds(getLiveElapsedSeconds(activeJob, nowTs))}
-                </div>
+             {mode === "manager" && (
+  <div style={styles.timerBadge}>
+    {formatSeconds(getLiveElapsedSeconds(activeJob, nowTs))}
+  </div>
+)}
 
                 {isImage(activeJob) && (
                   <>
