@@ -72,7 +72,6 @@ function buildIOSMessageLink(job, currentDurationText) {
     `Trabajo: ${job.title}`,
     `Plancha: ${stationName(job.station)}`,
     `Estado: ${STATUS_LABELS[job.status] || job.status}`,
-    `Duración: ${currentDurationText}`,
   ].join("\n");
 
   return `sms:${IOS_MESSAGE_NUMBER}?body=${encodeURIComponent(message)}`;
