@@ -14,6 +14,8 @@ const STATUS_LABELS = {
   done: "Finalizado",
 };
 
+const IOS_MESSAGE_NUMBER = "+34690396413";
+
 function getStationFromUrl() {
   const params = new URLSearchParams(window.location.search);
   const station = params.get("station");
@@ -73,7 +75,7 @@ function buildIOSMessageLink(job, currentDurationText) {
     `Duración: ${currentDurationText}`,
   ].join("\n");
 
-  return `sms:+34690396413&body=${encodeURIComponent(message)}`;
+  return `sms:${IOS_MESSAGE_NUMBER}?body=${encodeURIComponent(message)}`;
 }
 
 export default function App() {
@@ -132,11 +134,15 @@ export default function App() {
     [jobs]
   );
 
-  const   = useMemo(
-    ()  
+  const historyJobs = useMemo(
+    () =>
       jobs
         .filter((j) => j.status === "done")
-        .sort((a, b) => new Date(b.completed_at || 0) - new Date(a.completed_at || 0)),
+        .sort(
+          (a, b) =>
+            new Date(b.completed_at || 0).getTime() -
+            new Date(a.completed_at || 0).getTime()
+        ),
     [jobs]
   );
 
@@ -151,7 +157,7 @@ export default function App() {
       const aOrder = a.sort_order ?? 0;
       const bOrder = b.sort_order ?? 0;
       if (aOrder !== bOrder) return aOrder - bOrder;
-      return new Date(a.created_at) - new Date(b.created_at);
+      return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
     });
 
     for (const job of sorted) {
@@ -172,9 +178,7 @@ export default function App() {
       .order("created_at", { ascending: true });
 
     if (lockedToStation) {
-      query = query
-        .eq("station", selectedStation)
-        .neq("status", "done");
+      query = query.eq("station", selectedStation).neq("status", "done");
     }
 
     const { data, error } = await query;
@@ -282,8 +286,18 @@ export default function App() {
       return;
     }
 
-    setActiveJob((prev) => (prev?.id === job.id ? { ...prev, status: "in_progress" } : prev));
     await fetchJobs();
+
+    setActiveJob((prev) =>
+      prev?.id === job.id
+        ? {
+            ...prev,
+            status: "in_progress",
+            started_at: new Date().toISOString(),
+            paused_at: null,
+          }
+        : prev
+    );
   }
 
   async function pauseJob(job) {
@@ -315,6 +329,19 @@ export default function App() {
     }
 
     await fetchJobs();
+
+    setActiveJob((prev) =>
+      prev?.id === job.id
+        ? {
+            ...prev,
+            status: "paused",
+            paused_at: new Date().toISOString(),
+            started_at: null,
+            total_elapsed_seconds:
+              (job.total_elapsed_seconds || 0) + elapsedThisRun,
+          }
+        : prev
+    );
   }
 
   async function resumeJob(job) {
@@ -334,6 +361,17 @@ export default function App() {
     }
 
     await fetchJobs();
+
+    setActiveJob((prev) =>
+      prev?.id === job.id
+        ? {
+            ...prev,
+            status: "in_progress",
+            started_at: new Date().toISOString(),
+            paused_at: null,
+          }
+        : prev
+    );
   }
 
   async function finalizeJob(job) {
@@ -348,10 +386,12 @@ export default function App() {
         finalSeconds += Math.max(0, Math.floor((Date.now() - startedMs) / 1000));
       }
 
+      const completedAt = new Date().toISOString();
+
       const messageText = [
         `Trabajo: ${job.title}`,
         `Plancha: ${stationName(job.station)}`,
-        `Finalizado: ${new Date().toLocaleString()}`,
+        `Finalizado: ${new Date(completedAt).toLocaleString()}`,
         `Duración total: ${formatSeconds(finalSeconds)}`,
       ].join("\n");
 
@@ -359,7 +399,7 @@ export default function App() {
         .from("production_jobs")
         .update({
           status: "done",
-          completed_at: new Date().toISOString(),
+          completed_at: completedAt,
           started_at: null,
           paused_at: null,
           total_elapsed_seconds: finalSeconds,
@@ -460,7 +500,7 @@ export default function App() {
         const aOrder = a.sort_order ?? 0;
         const bOrder = b.sort_order ?? 0;
         if (aOrder !== bOrder) return aOrder - bOrder;
-        return new Date(a.created_at) - new Date(b.created_at);
+        return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
       });
 
     for (let i = 0; i < list.length; i++) {
@@ -634,6 +674,7 @@ export default function App() {
                       <div style={styles.managerJobList}>
                         {activeJobs.map((job) => {
                           const liveSeconds = getLiveElapsedSeconds(job, nowTs);
+
                           return (
                             <div key={job.id} style={styles.jobRow}>
                               <div>
@@ -642,8 +683,11 @@ export default function App() {
                                   {stationName(job.station)} ·{" "}
                                   {STATUS_LABELS[job.status]}
                                 </div>
-                                
+                                <div style={styles.jobMeta}>
+                                  Tiempo: {formatSeconds(liveSeconds)}
+                                </div>
                               </div>
+
                               <button
                                 style={styles.secondaryButton}
                                 onClick={() => openJob(job)}
@@ -798,7 +842,6 @@ export default function App() {
                           <div style={styles.jobMeta}>
                             {STATUS_LABELS[job.status]} · {job.file_name}
                           </div>
-                        
                           {job.notes ? (
                             <div style={styles.jobNotes}>{job.notes}</div>
                           ) : null}
@@ -812,6 +855,7 @@ export default function App() {
                           >
                             ↑
                           </button>
+
                           <button
                             style={styles.smallButton}
                             onClick={() => moveJob(job, "down")}
@@ -827,10 +871,7 @@ export default function App() {
                             Abrir
                           </button>
 
-                          <a
-                            href={smsLink}
-                            style={styles.linkButton}
-                          >
+                          <a href={smsLink} style={styles.linkButton}>
                             Mensajes
                           </a>
 
@@ -898,11 +939,12 @@ export default function App() {
                 </p>
               </div>
 
-             {mode === "manager" && (
-  <div style={styles.timerBadge}>
-    {formatSeconds(getLiveElapsedSeconds(activeJob, nowTs))}
-  </div>
-)}
+              <div style={styles.viewerControls}>
+                {mode === "manager" && (
+                  <div style={styles.timerBadge}>
+                    {formatSeconds(getLiveElapsedSeconds(activeJob, nowTs))}
+                  </div>
+                )}
 
                 {isImage(activeJob) && (
                   <>
