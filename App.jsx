@@ -132,8 +132,8 @@ export default function App() {
     [jobs]
   );
 
-  const historyJobs = useMemo(
-    () =>
+  const   = useMemo(
+    ()  
       jobs
         .filter((j) => j.status === "done")
         .sort((a, b) => new Date(b.completed_at || 0) - new Date(a.completed_at || 0)),
@@ -642,9 +642,7 @@ export default function App() {
                                   {stationName(job.station)} ·{" "}
                                   {STATUS_LABELS[job.status]}
                                 </div>
-                                <div style={styles.jobMeta}>
-                                  Tiempo: {formatSeconds(liveSeconds)}
-                                </div>
+                                
                               </div>
                               <button
                                 style={styles.secondaryButton}
@@ -800,9 +798,7 @@ export default function App() {
                           <div style={styles.jobMeta}>
                             {STATUS_LABELS[job.status]} · {job.file_name}
                           </div>
-                          <div style={styles.jobMeta}>
-                            Tiempo: {formatSeconds(liveSeconds)}
-                          </div>
+                        
                           {job.notes ? (
                             <div style={styles.jobNotes}>{job.notes}</div>
                           ) : null}
