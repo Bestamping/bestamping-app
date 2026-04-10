@@ -38,6 +38,16 @@ function isPdf(job) {
   );
 }
 
+function isExcel(job) {
+  return (
+    job?.file_type ===
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+    job?.file_type === "application/vnd.ms-excel" ||
+    job?.file_name?.toLowerCase().endsWith(".xlsx") ||
+    job?.file_name?.toLowerCase().endsWith(".xls")
+  );
+}
+
 function formatSeconds(total) {
   const s = Math.max(0, total || 0);
   const hours = Math.floor(s / 3600);
@@ -67,7 +77,7 @@ function getLiveElapsedSeconds(job, nowTs) {
   return total;
 }
 
-function buildIOSMessageLink(job, currentDurationText) {
+function buildIOSMessageLink(job) {
   const message = [
     `Trabajo: ${job.title}`,
     `Plancha: ${stationName(job.station)}`,
@@ -98,7 +108,7 @@ export default function App() {
   const [activeJob, setActiveJob] = useState(null);
   const [imageZoom, setImageZoom] = useState(1);
 
-  const [adminTab, setAdminTab] = useState("queue"); // queue | history
+  const [adminTab, setAdminTab] = useState("queue");
   const [nowTs, setNowTs] = useState(Date.now());
 
   useEffect(() => {
@@ -270,11 +280,13 @@ export default function App() {
   }
 
   async function startJob(job) {
+    const nowIso = new Date().toISOString();
+
     const { error } = await supabase
       .from("production_jobs")
       .update({
         status: "in_progress",
-        started_at: new Date().toISOString(),
+        started_at: nowIso,
         paused_at: null,
       })
       .eq("id", job.id);
@@ -292,7 +304,7 @@ export default function App() {
         ? {
             ...prev,
             status: "in_progress",
-            started_at: new Date().toISOString(),
+            started_at: nowIso,
             paused_at: null,
           }
         : prev
@@ -305,19 +317,22 @@ export default function App() {
       return;
     }
 
+    const pauseIso = new Date().toISOString();
     const startedMs = new Date(job.started_at).getTime();
     const elapsedThisRun = Math.max(
       0,
       Math.floor((Date.now() - startedMs) / 1000)
     );
 
+    const newTotal = (job.total_elapsed_seconds || 0) + elapsedThisRun;
+
     const { error } = await supabase
       .from("production_jobs")
       .update({
         status: "paused",
-        paused_at: new Date().toISOString(),
+        paused_at: pauseIso,
         started_at: null,
-        total_elapsed_seconds: (job.total_elapsed_seconds || 0) + elapsedThisRun,
+        total_elapsed_seconds: newTotal,
       })
       .eq("id", job.id);
 
@@ -334,21 +349,22 @@ export default function App() {
         ? {
             ...prev,
             status: "paused",
-            paused_at: new Date().toISOString(),
+            paused_at: pauseIso,
             started_at: null,
-            total_elapsed_seconds:
-              (job.total_elapsed_seconds || 0) + elapsedThisRun,
+            total_elapsed_seconds: newTotal,
           }
         : prev
     );
   }
 
   async function resumeJob(job) {
+    const nowIso = new Date().toISOString();
+
     const { error } = await supabase
       .from("production_jobs")
       .update({
         status: "in_progress",
-        started_at: new Date().toISOString(),
+        started_at: nowIso,
         paused_at: null,
       })
       .eq("id", job.id);
@@ -366,7 +382,7 @@ export default function App() {
         ? {
             ...prev,
             status: "in_progress",
-            started_at: new Date().toISOString(),
+            started_at: nowIso,
             paused_at: null,
           }
         : prev
@@ -604,12 +620,14 @@ export default function App() {
                 </div>
 
                 <div style={styles.field}>
-                  <label style={styles.label}>Archivo (JPG, PNG, PDF)</label>
+                  <label style={styles.label}>
+                    Archivo (JPG, PNG, PDF, Excel)
+                  </label>
                   <input
                     id="file-input"
                     style={styles.input}
                     type="file"
-                    accept=".jpg,.jpeg,.png,.pdf,image/*,application/pdf"
+                    accept=".jpg,.jpeg,.png,.pdf,.xlsx,.xls,image/*,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
                     onChange={(e) => setFile(e.target.files?.[0] || null)}
                   />
                 </div>
@@ -687,12 +705,20 @@ export default function App() {
                                 </div>
                               </div>
 
-                              <button
-                                style={styles.secondaryButton}
-                                onClick={() => openJob(job)}
-                              >
-                                Ver
-                              </button>
+                              <div style={styles.rowActions}>
+                                <button
+                                  style={styles.secondaryButton}
+                                  onClick={() => openJob(job)}
+                                >
+                                  Ver
+                                </button>
+                                <a
+                                  href={buildIOSMessageLink(job)}
+                                  style={styles.linkButton}
+                                >
+                                  Mensajes
+                                </a>
+                              </div>
                             </div>
                           );
                         })}
@@ -727,6 +753,12 @@ export default function App() {
                               >
                                 Ver
                               </button>
+                              <a
+                                href={buildIOSMessageLink(job)}
+                                style={styles.linkButton}
+                              >
+                                Mensajes
+                              </a>
                               <button
                                 style={styles.primaryButton}
                                 onClick={() => requeueJob(job)}
@@ -764,7 +796,7 @@ export default function App() {
 
                           {job.message_text ? (
                             <div style={styles.historyMessageBlock}>
-                              <strong>Mensaje</strong>
+                              <strong>Mensaje final</strong>
                               <div style={styles.preWrap}>{job.message_text}</div>
                             </div>
                           ) : null}
@@ -825,101 +857,96 @@ export default function App() {
                 ) : stationJobs.length === 0 ? (
                   <p>No hay trabajos para esta plancha.</p>
                 ) : (
-                  stationJobs.map((job, index) => {
-                    const liveSeconds = getLiveElapsedSeconds(job, nowTs);
-                    const smsLink = buildIOSMessageLink(
-                      job,
-                      formatSeconds(liveSeconds)
-                    );
+                  stationJobs.map((job, index) => (
+                    <div key={job.id} style={styles.queueItem}>
+                      <div style={styles.queueNumber}>{index + 1}</div>
 
-                    return (
-                      <div key={job.id} style={styles.queueItem}>
-                        <div style={styles.queueNumber}>{index + 1}</div>
-
-                        <div style={{ flex: 1 }}>
-                          <div style={styles.jobTitle}>{job.title}</div>
-                          <div style={styles.jobMeta}>
-                            {STATUS_LABELS[job.status]} · {job.file_name}
-                          </div>
-                          {job.notes ? (
-                            <div style={styles.jobNotes}>{job.notes}</div>
-                          ) : null}
+                      <div style={{ flex: 1 }}>
+                        <div style={styles.jobTitle}>{job.title}</div>
+                        <div style={styles.jobMeta}>
+                          {STATUS_LABELS[job.status]} · {job.file_name}
                         </div>
+                        {job.notes ? (
+                          <div style={styles.jobNotes}>{job.notes}</div>
+                        ) : null}
+                      </div>
 
-                        <div style={styles.queueActions}>
+                      <div style={styles.queueActions}>
+                        <button
+                          style={styles.smallButton}
+                          onClick={() => moveJob(job, "up")}
+                          disabled={index === 0}
+                        >
+                          ↑
+                        </button>
+
+                        <button
+                          style={styles.smallButton}
+                          onClick={() => moveJob(job, "down")}
+                          disabled={index === stationJobs.length - 1}
+                        >
+                          ↓
+                        </button>
+
+                        <button
+                          style={styles.secondaryButton}
+                          onClick={() => openJob(job)}
+                        >
+                          Ver
+                        </button>
+
+                        <a
+                          href={buildIOSMessageLink(job)}
+                          style={styles.linkButton}
+                        >
+                          Mensajes
+                        </a>
+
+                        {job.status === "pending" && (
                           <button
-                            style={styles.smallButton}
-                            onClick={() => moveJob(job, "up")}
-                            disabled={index === 0}
+                            style={styles.primaryButton}
+                            onClick={() => startJob(job)}
                           >
-                            ↑
+                            Empezar
                           </button>
+                        )}
 
-                          <button
-                            style={styles.smallButton}
-                            onClick={() => moveJob(job, "down")}
-                            disabled={index === stationJobs.length - 1}
-                          >
-                            ↓
-                          </button>
+                        {job.status === "in_progress" && (
+                          <>
+                            <button
+                              style={styles.pauseButton}
+                              onClick={() => pauseJob(job)}
+                            >
+                              Pausar
+                            </button>
+                            <button
+                              style={styles.dangerButton}
+                              onClick={() => finalizeJob(job)}
+                            >
+                              Finalizar
+                            </button>
+                          </>
+                        )}
 
-                          <button
-                            style={styles.secondaryButton}
-                            onClick={() => openJob(job)}
-                          >
-                            Abrir
-                          </button>
-
-                          <a href={smsLink} style={styles.linkButton}>
-                            Mensajes
-                          </a>
-
-                          {job.status === "pending" && (
+                        {job.status === "paused" && (
+                          <>
                             <button
                               style={styles.primaryButton}
-                              onClick={() => startJob(job)}
+                              onClick={() => resumeJob(job)}
                             >
-                              Empezar
+                              Reanudar
                             </button>
-                          )}
-
-                          {job.status === "in_progress" && (
-                            <>
-                              <button
-                                style={styles.pauseButton}
-                                onClick={() => pauseJob(job)}
-                              >
-                                Pausar
-                              </button>
-                              <button
-                                style={styles.dangerButton}
-                                onClick={() => finalizeJob(job)}
-                              >
-                                Finalizar
-                              </button>
-                            </>
-                          )}
-
-                          {job.status === "paused" && (
-                            <>
-                              <button
-                                style={styles.primaryButton}
-                                onClick={() => resumeJob(job)}
-                              >
-                                Reanudar
-                              </button>
-                              <button
-                                style={styles.dangerButton}
-                                onClick={() => finalizeJob(job)}
-                              >
-                                Finalizar
-                              </button>
-                            </>
-                          )}
-                        </div>
+                            <button
+                              style={styles.dangerButton}
+                              onClick={() => finalizeJob(job)}
+                            >
+                              Finalizar
+                            </button>
+                          </>
+                        )}
                       </div>
-                    );
-                  })
+                    </div>
+                  ))
                 )}
               </div>
             </section>
@@ -980,11 +1007,19 @@ export default function App() {
                   </a>
                 )}
 
+                {isExcel(activeJob) && (
+                  <a
+                    href={activeJobUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={styles.linkButton}
+                  >
+                    Abrir Excel
+                  </a>
+                )}
+
                 <a
-                  href={buildIOSMessageLink(
-                    activeJob,
-                    formatSeconds(getLiveElapsedSeconds(activeJob, nowTs))
-                  )}
+                  href={buildIOSMessageLink(activeJob)}
                   style={styles.linkButton}
                 >
                   Mensajes
@@ -1057,6 +1092,11 @@ export default function App() {
                   src={activeJobUrl}
                   style={styles.viewerIframe}
                 />
+              ) : isExcel(activeJob) ? (
+                <div style={styles.unsupported}>
+                  Este archivo Excel no se previsualiza aquí. Usa el botón{" "}
+                  <strong>Abrir Excel</strong>.
+                </div>
               ) : (
                 <div style={styles.unsupported}>
                   No se puede previsualizar este tipo de archivo.
@@ -1302,6 +1342,11 @@ const styles = {
     border: "1px solid #e5e7eb",
     borderRadius: 14,
     padding: 14,
+  },
+  rowActions: {
+    display: "flex",
+    gap: 8,
+    flexWrap: "wrap",
   },
   jobTitle: {
     fontWeight: 700,
