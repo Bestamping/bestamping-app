@@ -1007,17 +1007,15 @@ export default function App() {
                   </a>
                 )}
 
-                {isExcel(activeJob) && (
-                  <a
-                    href={activeJobUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    style={styles.linkButton}
-                  >
-                    Abrir Excel
-                  </a>
-                )}
-
+            {isExcel(activeJob) && (
+  <a
+    href={activeJobUrl}
+    download={activeJob.file_name || "archivo.xlsx"}
+    style={styles.linkButton}
+  >
+    Descargar Excel
+  </a>
+)}
                 <a
                   href={buildIOSMessageLink(activeJob)}
                   style={styles.linkButton}
@@ -1092,12 +1090,12 @@ export default function App() {
                   src={activeJobUrl}
                   style={styles.viewerIframe}
                 />
-              ) : isExcel(activeJob) ? (
-                <div style={styles.unsupported}>
-                  Este archivo Excel no se previsualiza aquí. Usa el botón{" "}
-                  <strong>Abrir Excel</strong>.
-                </div>
-              ) : (
+             ) : isExcel(activeJob) ? (
+  <div style={styles.unsupported}>
+    Este archivo Excel no se previsualiza aquí. Usa el botón{" "}
+    <strong>Descargar Excel</strong>.
+  </div>
+): (
                 <div style={styles.unsupported}>
                   No se puede previsualizar este tipo de archivo.
                 </div>
