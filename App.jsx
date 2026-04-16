@@ -5,6 +5,7 @@ const STATIONS = [
   { id: "plancha1", name: "Plancha 1" },
   { id: "plancha2", name: "Plancha 2" },
   { id: "plancha3", name: "Plancha 3" },
+  { id: "almacen", name: "Almacén" },
 ];
 
 const STATUS_LABELS = {
@@ -160,6 +161,7 @@ export default function App() {
       plancha1: [],
       plancha2: [],
       plancha3: [],
+      almacen: []
     };
 
     const sorted = [...activeJobs].sort((a, b) => {
